@@ -7,7 +7,7 @@ Análise de tráfego ISP em tempo real: **NetFlow v9** + **SNMP** + **BGP** do r
 | Fonte | Endpoint | Uso |
 |-------|----------|-----|
 | NetFlow v9 | UDP `:2055` | Classificação CDN, Netflix, Globo, streaming, peers (ASN/next-hop/ifIndex) |
-| SNMP v2c | `170.245.127.191:15161` community `infornetV2` | Interfaces (dedupe Eth-Trunk), Mbps, CPU, mem |
+| SNMP v2c | `170.245.127.191:15161` | Interfaces (dedupe Eth-Trunk), Mbps, CPU, mem — community em `/etc/inforflow/secrets.env` |
 | BGP4-MIB | via SNMP | Sessões BGP e atribuição de tráfego por ASN |
 | Feeds | Cloudflare IPs (+ `data/feeds/extra.txt`) | Prefixos CDN atualizados periodicamente |
 
@@ -45,21 +45,40 @@ Alertas externos (opcional em `config.json`):
 - `alert_util_pct` — limiar de uplink
 - `alert_asn_pct` / `alert_asn_mbps` — limiar por ASN de destino
 
-Auth opcional: defina `api_token` em `config.json` ou `INFORFLOW_API_TOKEN`. Enviei `X-API-Token` ou `?token=`.
+Auth: defina `INFORFLOW_API_TOKEN`, `INFORFLOW_UI_USER` e `INFORFLOW_UI_PASSWORD` em `/etc/inforflow/secrets.env`. Login em `/login` gera **token de sessão** (24h). API usa header `X-API-Token`.
 
-## Configuração
+## Deploy (produção)
 
-Arquivo `config.json` (ou env `INFORFLOW_*`):
+```bash
+# 1. Secrets (chmod 600)
+cp secrets.env.example /etc/inforflow/secrets.env
+# editar: INFORFLOW_API_TOKEN, INFORFLOW_SNMP_COMMUNITY, UI user/pass, S3…
 
-- `sampling_rate`: `0` = auto (prioriza amostragem nativa do template NetFlow; senão SNMP/NetFlow); ou fator fixo (ex. `1000`)
-- `alert_util_pct`: limiar de alerta de utilização uplink
-- `alert_asn_pct` / `alert_asn_mbps`: alerta quando um ASN de destino excede % do uplink ou Mbps absoluto
-- `data_dir`: histórico, feeds, `asn_daily.json`, `sampling_native.json`
-## Execução
+# 2. Build + systemd + nginx + healthcheck timer
+./start.sh
+
+# 3. UptimeRobot (monitores HTTP)
+INFORFLOW_UPTIMEROBOT_API_KEY=... ./scripts/setup-uptimerobot.sh
+
+# 4. Uptime Kuma (alertas + push heartbeat)
+INFORFLOW_UPTIMEKUMA_API_KEY=uk2_... \
+INFORFLOW_UPTIMEKUMA_USER=admin INFORFLOW_UPTIMEKUMA_PASSWORD=... \
+python3 scripts/setup-uptimekuma.py
+
+# 5. Verificar
+./scripts/healthcheck.sh
+journalctl -u inforflow-collector -f
+```
+
+Serviços systemd: `inforflow-collector`, `inforflow-web`, `inforflow-healthcheck.timer` (a cada 2 min).
+
+API do coletor escuta em `127.0.0.1:9090` — exposta via nginx (`/api/`).
+
+## Execução (dev)
 
 ```bash
 ./start.sh
 ```
 
 UI: http://localhost:8080  
-API: http://localhost:9090  
+API: http://127.0.0.1:9090  

@@ -1,0 +1,8 @@
+[Unit]
+Description=Inforflow healthcheck (SNMP + NetFlow + disk)
+After=network-online.target inforflow-collector.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/inforflow/secrets.env
+ExecStart=/var/www/html/inforflow/scripts/healthcheck.sh

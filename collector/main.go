@@ -102,6 +102,7 @@ type ASNTraffic struct {
 	Percentage float64 `json:"percentage"`
 	Category   string  `json:"category"`
 	Icon       string  `json:"icon"`
+	Pending    bool    `json:"pending,omitempty"`
 }
 
 type CategoryConsumption struct {
@@ -490,9 +491,31 @@ func (s *FlowStore) rebuildTopCards(svcBytes map[string]int64) {
 	}
 }
 
+func (s *FlowStore) refreshDerivedLocked() {
+	svcBytes := map[string]int64{}
+	for _, sm := range s.window {
+		if sm.service != "" {
+			svcBytes[sm.service] += sm.bytes
+		}
+	}
+	s.rebuildConsumptionLocked(svcBytes)
+	s.rebuildTopCards(svcBytes)
+}
+
+func (s *FlowStore) startDerivedRefresh() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		for range ticker.C {
+			s.mu.Lock()
+			s.refreshDerivedLocked()
+			s.mu.Unlock()
+		}
+	}()
+}
+
 func (s *FlowStore) GetStats() AggregatedStats {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	svcBytes := map[string]int64{}
 	svcIn := map[string]int64{}
@@ -513,8 +536,7 @@ func (s *FlowStore) GetStats() AggregatedStats {
 			}
 		}
 	}
-	s.rebuildConsumptionLocked(svcBytes)
-	s.rebuildTopCards(svcBytes)
+	// rebuild feito em startDerivedRefresh(); aqui só leitura
 
 	out := s.stats
 	out.ByCategory = copyMap(s.stats.ByCategory)
@@ -723,9 +745,7 @@ func buildASNBreakdown(
 	}
 	out := make([]ASNTraffic, 0, len(seen))
 	for as := range seen {
-		if !isVerifiedASN(as) {
-			continue
-		}
+		verified := isVerifiedASN(as)
 		bytes := byBytes[as]
 		win := winBytes[as]
 		if bytes == 0 && win == 0 {
@@ -737,18 +757,21 @@ func buildASNBreakdown(
 		v4M := float64(v4Bytes[as]) * 8 / windowSec / 1e6
 		v6M := float64(v6Bytes[as]) * 8 / windowSec / 1e6
 		name := asnDisplayName(as)
+		if !verified {
+			name = fmt.Sprintf("AS%d (pendente)", as)
+		}
 		cat := "other"
 		icon := "peer"
 		if c := classifyByASN(as); c.Name != "" {
 			cat = string(c.Category)
 			icon = c.Icon
-			if strings.HasPrefix(name, "AS") {
+			if verified && strings.HasPrefix(name, "AS") {
 				name = c.Name
 			}
-		} else if p, ok := bgpStore.LookupAS(as); ok {
+		} else if p, ok := bgpStore.LookupAS(as); ok && verified {
 			name = p.Name
 			cat = "peer"
-		} else if n := ipapi.NameForASN(as); n != "" {
+		} else if n := ipapi.NameForASN(as); n != "" && verified {
 			name = n
 		}
 		out = append(out, ASNTraffic{
@@ -765,6 +788,7 @@ func buildASNBreakdown(
 			Percentage: float64(bytes) / float64(total) * 100,
 			Category:   cat,
 			Icon:       icon,
+			Pending:    !verified,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -963,8 +987,7 @@ func (s *FlowStore) pushHistory() {
 	if len(s.history) > 120 {
 		s.history = s.history[len(s.history)-120:]
 	}
-	go appendHistoryFile(pt)
-	go storageInsert(pt, float64(v4b)*8/ws/1e6*eff, float64(v6b)*8/ws/1e6*eff)
+	go storageEnqueue(pt, float64(v4b)*8/ws/1e6*eff, float64(v6b)*8/ws/1e6*eff)
 	go persistASNDaily()
 }
 
@@ -1289,6 +1312,7 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 
 func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		incHTTPReq()
 		enableCORS(w)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -1497,6 +1521,8 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	snmp := snmpStore.Get()
 	bgp := bgpStore.Get()
 	samp := sampling.Get()
+	silent := netFlowSilentSec()
+	pts, dbBytes := storageLocalStats()
 	writeJSON(w, map[string]interface{}{
 		"status":       "ok",
 		"source_ip":    SourceIP,
@@ -1506,14 +1532,22 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"snmp":         snmp.OK,
 		"bgp":          bgp.OK,
 		"bgp_peers":    bgp.Established,
+		"bgp_total":    bgp.Total,
 		"sys_name":     snmp.SysName,
 		"uptime_s":     int(time.Since(store.started).Seconds()),
 		"flows":        atomic.LoadUint64(&store.seq),
 		"sampling":     samp.Effective,
+		"sampling_mode": samp.Mode,
 		"mbps_scaled":  samp.ScaledMbps,
+		"snmp_mbps":    (snmp.UplinkInMbps + snmp.UplinkOutMbps) / 2,
+		"netflow_silent_s": silent,
 		"alerts":       len(alerts.Active()),
 		"auth_enabled": GetConfig().APIToken != "" || uiAuthEnabled(),
 		"ipapi":        ipapi.Stats(),
+		"storage": map[string]interface{}{
+			"history_points": pts,
+			"db_bytes":       dbBytes,
+		},
 	})
 }
 
@@ -1537,8 +1571,12 @@ func main() {
 	}
 
 	initStorage()
+	startStorageWriter()
 	loadNativeSampling()
 	loadASNDaily()
+	loadPeersConfig()
+	startSessionJanitor()
+	store.startDerivedRefresh()
 	StartIPAPIResolver()
 	StartSNMPPoller()
 	StartBGPPoller()

@@ -1,0 +1,19 @@
+[Unit]
+Description=Inforflow Web UI
+After=network-online.target inforflow-collector.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/var/www/html/inforflow
+ExecStart=/var/www/html/inforflow/bin/inforflow
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

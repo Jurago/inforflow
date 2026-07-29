@@ -1459,6 +1459,19 @@ body {
     color: inherit;
 }
 
+.alert-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    background: rgba(248, 113, 113, 0.15);
+    color: #f87171;
+    margin-left: 8px;
+}
+.traffic-name.pending-asn { opacity: 0.75; font-style: italic; }
+
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
         animation-duration: 0.01ms !important;

@@ -32,7 +32,6 @@
             const data = await res.json();
             if (data.ok && data.token) {
                 localStorage.setItem('inforflow_api_token', data.token);
-                if (window.Inforflow) window.Inforflow.API_TOKEN = data.token;
                 window.location.href = '/';
                 return;
             }

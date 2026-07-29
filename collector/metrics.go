@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -39,6 +40,13 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "inforflow_alerts_active %d\n", len(alerts.Active()))
 	fmt.Fprintf(w, "inforflow_netflow_silent_seconds %d\n", netFlowSilentSec())
 	fmt.Fprintf(w, "inforflow_s3_enabled %d\n", boolMetric(s3Enabled()))
+	pts, dbBytes := storageLocalStats()
+	fmt.Fprintf(w, "inforflow_history_points %d\n", pts)
+	fmt.Fprintf(w, "inforflow_db_bytes %d\n", dbBytes)
+	if fi, err := os.Stat(GetConfig().DataDir); err == nil {
+		fmt.Fprintf(w, "inforflow_data_dir_exists 1\n")
+		_ = fi
+	}
 	if stats.ByCategoryMbps != nil {
 		for cat, mbps := range stats.ByCategoryMbps {
 			fmt.Fprintf(w, "inforflow_category_mbps{category=%q} %.4f\n", cat, mbps)

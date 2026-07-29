@@ -1,16 +1,43 @@
 const API_BASE = '/api';
-const API_TOKEN = localStorage.getItem('inforflow_api_token') || '';
+
+function getApiToken() {
+    return localStorage.getItem('inforflow_api_token') || '';
+}
 
 function apiHeaders() {
     const h = {};
-    if (API_TOKEN) h['X-API-Token'] = API_TOKEN;
+    const tok = getApiToken();
+    if (tok) h['X-API-Token'] = tok;
     return h;
 }
 
 async function apiGet(path) {
     const res = await fetch(`${API_BASE}${path}`, { headers: apiHeaders() });
+    if (res.status === 401) {
+        if (window.location.pathname !== '/login') {
+            localStorage.removeItem('inforflow_api_token');
+            window.location.href = '/login';
+        }
+        throw new Error('HTTP 401');
+    }
     if (!res.ok) throw new Error('HTTP ' + res.status);
     return res.json();
+}
+
+async function exportDownload(kind, format) {
+    const q = new URLSearchParams({ kind: kind || 'stats', format: format || 'csv' });
+    const res = await fetch(`${API_BASE}/export?${q}`, { headers: apiHeaders() });
+    if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+    }
+    if (!res.ok) return;
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `inforflow-${kind}.${format || 'csv'}`;
+    a.click();
+    URL.revokeObjectURL(a.href);
 }
 
 function formatBytes(bytes) {
@@ -312,7 +339,6 @@ async function fetchSampling() {
 
 function exportURL(kind, format) {
     const q = new URLSearchParams({ kind: kind || 'stats', format: format || 'json' });
-    if (API_TOKEN) q.set('token', API_TOKEN);
     return `${API_BASE}/export?${q}`;
 }
 
@@ -342,8 +368,14 @@ function timeFilterBar(onChange) {
         </div>`;
 }
 
+function updateSourceIP(ip) {
+    document.querySelectorAll('[data-source-ip]').forEach(el => {
+        if (ip) el.textContent = ip;
+    });
+}
+
 window.Inforflow = {
-    API_BASE, API_TOKEN, apiHeaders, apiGet,
+    API_BASE, getApiToken, apiHeaders, apiGet, exportDownload,
     formatBytes, formatMbps, formatRate, formatNumber,
     categoryBadge, directionBadge, createCard, createTrafficRow, createIfaceCard,
     renderCategoryBars, renderConsumption, spawnFlowParticle, renderAlerts,

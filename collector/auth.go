@@ -21,17 +21,6 @@ func safeStringEq(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func validSessionToken(got string) bool {
-	c := GetConfig()
-	if c.APIToken == "" {
-		return !uiAuthEnabled()
-	}
-	if got == "" {
-		got = ""
-	}
-	return safeStringEq(got, c.APIToken)
-}
-
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 	if r.Method == http.MethodOptions {
@@ -63,20 +52,28 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{"ok": false, "error": "Usuário ou senha inválidos"})
 		return
 	}
-	if c.APIToken == "" {
+	token := newSessionToken(user)
+	if token == "" {
 		w.WriteHeader(http.StatusInternalServerError)
-		writeJSON(w, map[string]interface{}{"ok": false, "error": "token de sessão não configurado"})
+		writeJSON(w, map[string]interface{}{"ok": false, "error": "falha ao gerar sessão"})
 		return
 	}
 	writeJSON(w, map[string]interface{}{
 		"ok":    true,
-		"token": c.APIToken,
+		"token": token,
 		"user":  c.UIUser,
 	})
 }
 
 func handleLogout(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
+	got := r.Header.Get("X-API-Token")
+	if got == "" {
+		got = r.URL.Query().Get("token")
+	}
+	if got != "" {
+		revokeSessionToken(got)
+	}
 	writeJSON(w, map[string]interface{}{"ok": true})
 }
 

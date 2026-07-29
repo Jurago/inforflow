@@ -75,7 +75,7 @@ impl Layout {
             <div class="sidebar-footer">
                 <div class="source-ip-badge">
                     <span class="pulse-dot"></span>
-                    <span>170.245.127.191</span>
+                    <span data-source-ip>—</span>
                 </div>
                 <button type="button" class="logout-btn" onclick="window.Inforflow && window.Inforflow.logout()">Sair</button>
             </div>

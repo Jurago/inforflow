@@ -31,12 +31,14 @@ pub fn content() -> String {
             <option value="other">Outros</option>
         </select>
         <button type="button" id="flow-search" class="tf-btn">Buscar</button>
+        <button type="button" id="flow-export" class="tf-btn">Export CSV</button>
         <span id="flow-filter-hint" class="section-hint" style="margin:0"></span>
     </section>
     <section class="flow-table-section fade-in-up">
         <table class="flow-table">
             <thead><tr>
-                <th>Hora</th><th>Categoria</th><th>Origem → Destino</th><th>Serviço</th><th>ASN</th><th>Bytes</th><th>Dir</th><th>IP</th>
+                <th>Hora</th><th>Cat.</th><th>Origem → Destino</th><th>Serviço</th><th>Dst ASN</th>
+                <th>Peer ASN</th><th>Interface</th><th>Next-hop</th><th>Portas</th><th>Bytes</th><th>Dir</th><th>IP</th>
             </tr></thead>
             <tbody id="flows-body"></tbody>
         </table>

@@ -2,54 +2,44 @@
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
-mkdir -p bin data/feeds
 
 echo "╔══════════════════════════════════════════╗"
 echo "║     INFORFLOW — NetFlow + SNMP + BGP     ║"
 echo "╚══════════════════════════════════════════╝"
 
-echo "[1/4] Compilando coletor Go..."
+echo "[1/3] Compilando coletor Go..."
 (cd collector && go build -o ../bin/inforflow-collector .)
 
-echo "[2/4] Compilando servidor Rust..."
+echo "[2/3] Compilando servidor Rust..."
 (cd server && cargo build --release)
 TARGET="${CARGO_TARGET_DIR:-$DIR/server/target}/release/inforflow"
 cp -f "$TARGET" bin/inforflow
 
-echo "[3/4] Reiniciando serviços..."
-for pid in $(pgrep -f '/bin/inforflow-collector' || true); do kill "$pid" 2>/dev/null || true; done
-for pid in $(pgrep -f '/bin/inforflow$' || true); do kill "$pid" 2>/dev/null || true; done
-sleep 1
+	echo "[3/3] Reiniciando via systemd..."
+mkdir -p data/feeds
+[ -f deploy/peers.json ] && [ ! -f data/peers.json ] && cp deploy/peers.json data/peers.json
+cp -f deploy/inforflow-collector.service deploy/inforflow-web.service \
+  deploy/inforflow-healthcheck.service deploy/inforflow-healthcheck.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable inforflow-collector inforflow-web inforflow-healthcheck.timer
+systemctl restart inforflow-collector inforflow-web
+systemctl start inforflow-healthcheck.timer
 
-"$DIR/bin/inforflow-collector" >> /tmp/inforflow-collector.log 2>&1 &
-COL_PID=$!
-echo "  Coletor NetFlow :2055 + API :9090 (pid $COL_PID)"
-sleep 2
-"$DIR/bin/inforflow" >> /tmp/inforflow-server.log 2>&1 &
-WEB_PID=$!
-echo "  UI http://localhost:8080 (pid $WEB_PID)"
-
-echo "[4/4] Health check..."
-ok=0
-for i in 1 2 3 4 5 6 7 8; do
-  if curl -sf http://127.0.0.1:9090/api/health >/dev/null 2>&1 \
-     && curl -sf -o /dev/null http://127.0.0.1:8080/; then
-    ok=1
-    break
+if [ -f deploy/nginx-inforflow.conf ]; then
+  cp -f deploy/nginx-inforflow.conf /etc/nginx/sites-available/inforflow
+  ln -sf /etc/nginx/sites-available/inforflow /etc/nginx/sites-enabled/inforflow
+  if [ -f deploy/nginx-rate-limit.conf ]; then
+    cp -f deploy/nginx-rate-limit.conf /etc/nginx/conf.d/inforflow-rate-limit.conf
   fi
-  sleep 1
-done
+  nginx -t && systemctl reload nginx
+fi
 
-if [ "$ok" = 1 ]; then
-  health=$(curl -sf http://127.0.0.1:9090/api/health)
-  echo "  OK — $health" | head -c 200; echo
+sleep 3
+if /var/www/html/inforflow/scripts/healthcheck.sh; then
   echo ""
-  echo "  Dashboard:  http://localhost:8080"
-  echo "  Stats:      http://localhost:9090/api/stats"
-  echo "  Alerts:     http://localhost:9090/api/alerts"
-  echo "  Export:     http://localhost:9090/api/export?kind=cdn&format=csv"
-  echo "  Config:     $DIR/config.json"
+  echo "  Dashboard:  https://inforflow.infornetmg.com.br/"
+  echo "  Health:     http://127.0.0.1:9090/api/health"
 else
-  echo "  FALHA no health check — veja /tmp/inforflow-collector.log e /tmp/inforflow-server.log"
+  echo "  FALHA no healthcheck — journalctl -u inforflow-collector -n 50"
   exit 1
 fi

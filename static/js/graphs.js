@@ -6,6 +6,29 @@
     let catChartType = 'line'; // line | stacked
     let compareMode = false;
 
+    const urlInit = new URLSearchParams(window.location.search);
+    if (urlInit.get('h')) historyHours = parseInt(urlInit.get('h'), 10) || 0;
+    if (urlInit.get('mode') === 'raw') chartMode = 'raw';
+    if (urlInit.get('compare') === '1') compareMode = true;
+    document.querySelectorAll('#time-filter .tf-btn').forEach(b => {
+        b.classList.toggle('active', parseInt(b.dataset.h, 10) === historyHours);
+    });
+    document.querySelectorAll('#chart-mode-toggle .tf-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.mode === chartMode);
+    });
+    document.querySelectorAll('#chart-compare-toggle .tf-btn').forEach(b => {
+        b.classList.toggle('active', (b.dataset.compare === '1') === compareMode);
+    });
+
+    function persistGraphURL() {
+        const q = new URLSearchParams();
+        if (historyHours > 0) q.set('h', String(historyHours));
+        if (chartMode === 'raw') q.set('mode', 'raw');
+        if (compareMode) q.set('compare', '1');
+        const s = q.toString();
+        history.replaceState(null, '', s ? `${window.location.pathname}?${s}` : window.location.pathname);
+    }
+
     const CAT_COLORS = {
         cdn: '#f59e0b', netflix: '#e50914', globo: '#0066cc',
         streaming: '#8b5cf6', peer: '#06b6d4', other: '#64748b',
@@ -417,6 +440,11 @@
         document.getElementById('tooltip-categories'),
         { height: 340, stacked: false }
     );
+    const chartAsn = createInteractiveChart(
+        document.getElementById('chart-asn'),
+        document.getElementById('tooltip-asn'),
+        { height: 280 }
+    );
 
     function downsampleHistory(hist, maxPoints) {
         if (!hist || hist.length <= maxPoints) return hist || [];
@@ -560,6 +588,25 @@
         chartCategories.setStacked(catChartType === 'stacked');
         chartCategories.setData(timestamps, catSeries, { animate: true });
         renderLegend(document.getElementById('legend-categories'), catSeries, chartCategories, (id) => chartCategories.toggleSeries(id));
+
+        const asnKeys = new Set();
+        hist.forEach(h => {
+            const m = h.by_asn_mbps_scaled || h.by_asn_mbps || {};
+            Object.keys(m).forEach(k => { if (m[k] > 0.05) asnKeys.add(k); });
+        });
+        const topAsns = [...asnKeys].slice(0, 8);
+        const asnColors = ['#f59e0b', '#8b5cf6', '#06b6d4', '#ef4444', '#22c55e', '#3b82f6', '#ec4899', '#64748b'];
+        const asnSeries = topAsns.map((k, i) => ({
+            id: k,
+            label: k,
+            color: asnColors[i % asnColors.length],
+            data: hist.map(h => {
+                const m = h.by_asn_mbps_scaled || h.by_asn_mbps || {};
+                return m[k] || 0;
+            })
+        }));
+        chartAsn.setData(timestamps, asnSeries, { animate: true });
+        renderLegend(document.getElementById('legend-asn'), asnSeries, chartAsn, (id) => chartAsn.toggleSeries(id));
     }
 
     document.getElementById('time-filter')?.addEventListener('click', (e) => {
@@ -568,6 +615,7 @@
         historyHours = parseInt(btn.dataset.h, 10) || 0;
         document.querySelectorAll('#time-filter .tf-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        persistGraphURL();
         update();
     });
 
@@ -577,6 +625,7 @@
         chartMode = btn.dataset.mode;
         document.querySelectorAll('#chart-mode-toggle .tf-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        persistGraphURL();
         update();
     });
 
@@ -595,6 +644,7 @@
         compareMode = btn.dataset.compare === '1';
         document.querySelectorAll('#chart-compare-toggle .tf-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
+        persistGraphURL();
         update();
     });
 
@@ -603,5 +653,6 @@
     window.addEventListener('resize', () => {
         chartTotal.redraw();
         chartCategories.redraw();
+        chartAsn.redraw();
     });
 })();

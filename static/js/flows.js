@@ -1,5 +1,5 @@
 (function () {
-    const { formatBytes, categoryBadge, directionBadge, apiGet } = window.Inforflow;
+    const { formatBytes, categoryBadge, directionBadge, apiGet, exportDownload } = window.Inforflow;
 
     function paramsFromURL() {
         const u = new URLSearchParams(window.location.search);
@@ -9,6 +9,17 @@
             category: u.get('category') || '',
             asn: u.get('asn') || ''
         };
+    }
+
+    function syncURL(p) {
+        const q = new URLSearchParams();
+        if (p.q) q.set('q', p.q);
+        if (p.ip) q.set('ip', p.ip);
+        if (p.category) q.set('category', p.category);
+        if (p.asn) q.set('asn', p.asn);
+        const s = q.toString();
+        const url = s ? `${window.location.pathname}?${s}` : window.location.pathname;
+        history.replaceState(null, '', url);
     }
 
     function applyParamsToForm(p) {
@@ -29,6 +40,7 @@
         const cat = document.getElementById('flow-cat').value;
         const asnEl = document.getElementById('flow-asn');
         const asn = asnEl ? asnEl.value.trim() : '';
+        syncURL({ q, ip, category: cat, asn });
         const params = new URLSearchParams({ limit: '100' });
         if (q) params.set('q', q);
         if (ip) params.set('ip', ip);
@@ -41,25 +53,35 @@
         if (filterHint) {
             filterHint.textContent = asn
                 ? `Filtrando ASN ${asn}` + (flows.length ? ` · ${flows.length} flows` : '')
-                : '';
+                : (flows.length ? `${flows.length} flows` : '');
         }
         tbody.innerHTML = (flows || []).map(f => {
             const t = new Date(f.timestamp * 1000).toLocaleTimeString('pt-BR');
             const svc = f.destination !== f.src_ip ? f.destination : f.origin;
+            const ports = (f.src_port && f.dst_port) ? `${f.src_port}→${f.dst_port}` : '—';
             return `<tr>
                 <td>${t}</td>
                 <td>${categoryBadge(f.category)}</td>
                 <td><code>${f.src_ip}</code> → <code>${f.dst_ip}</code></td>
                 <td>${svc || '—'}</td>
                 <td>${f.dst_asn || f.asn || '—'}</td>
+                <td>${f.peer_asn || '—'}</td>
+                <td>${f.iface_name || f.cache_iface || '—'}</td>
+                <td>${f.next_hop || '—'}</td>
+                <td>${ports}</td>
                 <td>${formatBytes(f.bytes)}</td>
                 <td>${directionBadge(f.direction)}</td>
                 <td>${f.ip_version || '4'}</td>
             </tr>`;
-        }).join('') || '<tr><td colspan="8">Nenhum flow encontrado</td></tr>';
+        }).join('') || '<tr><td colspan="12">Nenhum flow encontrado</td></tr>';
     }
 
     applyParamsToForm(paramsFromURL());
-    document.getElementById('flow-search').addEventListener('click', search);
+    document.getElementById('flow-search')?.addEventListener('click', search);
+    document.getElementById('flow-export')?.addEventListener('click', e => {
+        e.preventDefault();
+        exportDownload('flows', 'csv');
+    });
     search();
+    setInterval(search, 8000);
 })();

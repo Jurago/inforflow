@@ -2,16 +2,59 @@
     const {
         formatBytes, formatMbps, formatRate, formatNumber, createCard, createIfaceCard,
         renderCategoryBars, renderConsumption, spawnFlowParticle, renderAlerts,
-        fetchStats, fetchFlows, fetchAlerts, categoryBadge, directionBadge, exportURL,
-        tweenMbps, prefersReducedMotion
+        fetchStats, fetchFlows, fetchAlerts, categoryBadge, directionBadge,
+        tweenMbps, prefersReducedMotion, updateSourceIP, exportDownload
     } = window.Inforflow;
 
     let prevFlows = [];
     let lastMbpsScaled = 0;
 
+    document.getElementById('export-csv')?.addEventListener('click', e => {
+        e.preventDefault();
+        exportDownload('stats', 'csv');
+    });
+
+    function renderBGP(bgp) {
+        const el = document.getElementById('bgp-summary');
+        const hint = document.getElementById('bgp-summary-hint');
+        if (!el || !bgp) return;
+        if (hint) {
+            hint.textContent = bgp.ok
+                ? `${bgp.established}/${bgp.total} estabelecidas · AS${bgp.local_as || ''}`
+                : (bgp.error || 'indisponível');
+        }
+        const peers = (bgp.peers || []).slice().sort((a, b) => (b.mbps || 0) - (a.mbps || 0));
+        const down = peers.filter(p => !p.established).slice(0, 4);
+        const up = peers.filter(p => p.established).slice(0, 8);
+        el.innerHTML = [
+            ...up.map(p => `<div class="dest-card cat-${p.role === 'ix' ? 'peer' : 'cdn'}">
+                <div class="card-name">${p.name || p.asn}</div>
+                <div class="card-mbps">${formatMbps(p.mbps)}</div>
+                <div class="card-pct">${p.remote_addr || ''} · ${p.state_name || 'up'}</div>
+            </div>`),
+            ...down.map(p => `<div class="dest-card" style="opacity:0.65;border-color:#f87171">
+                <div class="card-name">${p.name || p.asn} ↓</div>
+                <div class="card-pct">${p.state_name || 'down'}</div>
+            </div>`)
+        ].join('') || '<div class="dest-card"><div class="card-name">Aguardando BGP…</div></div>';
+    }
+
+    function updateAlertBadge(count) {
+        const b = document.getElementById('alert-badge');
+        if (!b) return;
+        if (count > 0) {
+            b.style.display = 'inline-flex';
+            b.textContent = count + ' alerta' + (count > 1 ? 's' : '');
+        } else {
+            b.style.display = 'none';
+        }
+    }
+
     async function updateDashboard() {
         const stats = await fetchStats();
         if (!stats) return;
+
+        updateSourceIP(stats.source || stats.exporter);
 
         tweenMbps(document.getElementById('nf-mbps'), stats.mbps);
         const rateEl = document.getElementById('bytes-rate');
@@ -23,13 +66,20 @@
         if (sampInfo && stats.sampling) {
             const mode = stats.sampling.mode || 'auto';
             const native = stats.sampling.native > 1 ? ` · nativo 1:${Math.round(stats.sampling.native)}` : '';
-            sampInfo.textContent = `fator ~${(stats.sampling.effective || 1).toFixed(0)}× (${mode}${native})`;
+            const snmp = stats.snmp;
+            let warn = '';
+            if (mode === 'auto' && snmp && snmp.ok && stats.sampling.scaled_mbps && snmp.uplink_in_mbps) {
+                const ratio = stats.sampling.scaled_mbps / Math.max((snmp.uplink_in_mbps + snmp.uplink_out_mbps) / 2, 1);
+                if (ratio < 0.5 || ratio > 2) warn = ' ⚠ divergência SNMP';
+            }
+            sampInfo.textContent = `fator ~${(stats.sampling.effective || 1).toFixed(0)}× (${mode}${native})${warn}`;
+            if (warn) sampInfo.style.color = '#fbbf24';
+            else sampInfo.style.color = '';
         }
 
-        const exp = document.getElementById('export-csv');
-        if (exp) exp.href = exportURL('stats', 'csv');
-
         renderAlerts(stats.alerts || [], 'alerts-list');
+        updateAlertBadge((stats.alerts || []).length);
+        renderBGP(stats.bgp);
 
         const snmp = stats.snmp;
         if (snmp && snmp.ok) {

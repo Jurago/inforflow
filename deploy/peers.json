@@ -1,0 +1,21 @@
+{
+  "26162": {"name": "IX.br", "role": "ix"},
+  "15169": {"name": "Google", "role": "content"},
+  "32934": {"name": "Meta", "role": "content"},
+  "6939": {"name": "Hurricane Electric", "role": "transit"},
+  "266022": {"name": "Infornet", "role": "regional"},
+  "269096": {"name": "N&K Tecnologia", "role": "regional"},
+  "272694": {"name": "AS272694", "role": "regional"},
+  "263433": {"name": "AS263433", "role": "regional"},
+  "267311": {"name": "AS267311", "role": "regional"},
+  "268843": {"name": "AS268843", "role": "regional"},
+  "13335": {"name": "Cloudflare", "role": "content"},
+  "20940": {"name": "Akamai", "role": "content"},
+  "2906": {"name": "Netflix", "role": "content"},
+  "16509": {"name": "Amazon", "role": "content"},
+  "8075": {"name": "Microsoft", "role": "content"},
+  "714": {"name": "Apple", "role": "content"},
+  "174": {"name": "Cogent", "role": "transit"},
+  "1299": {"name": "Telia", "role": "transit"},
+  "65332": {"name": "iBGP / privado", "role": "private"}
+}

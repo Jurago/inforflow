@@ -16,7 +16,35 @@ import (
 var (
 	historyDB   *sql.DB
 	storageOnce sync.Once
+	storageCh   chan storageJob
 )
+
+type storageJob struct {
+	pt  HistoryPoint
+	v4  float64
+	v6  float64
+}
+
+func startStorageWriter() {
+	storageCh = make(chan storageJob, 64)
+	go func() {
+		for job := range storageCh {
+			storageInsert(job.pt, job.v4, job.v6)
+		}
+	}()
+}
+
+func storageEnqueue(pt HistoryPoint, v4, v6 float64) {
+	if storageCh == nil {
+		storageInsert(pt, v4, v6)
+		return
+	}
+	select {
+	case storageCh <- storageJob{pt: pt, v4: v4, v6: v6}:
+	default:
+		go storageInsert(pt, v4, v6)
+	}
+}
 
 const defaultLocalHours = 72  // 3 dias na VM
 const defaultS3Days     = 30  // restante no S3
@@ -176,7 +204,29 @@ func queryHistorySince(since int64) []HistoryPoint {
 		lastTs = pt.Ts
 		merged = append(merged, pt)
 	}
-	return merged
+	return downsampleHistory(merged, 800)
+}
+
+func downsampleHistory(pts []HistoryPoint, maxPoints int) []HistoryPoint {
+	if maxPoints <= 0 || len(pts) <= maxPoints {
+		return pts
+	}
+	step := float64(len(pts)) / float64(maxPoints)
+	if step < 1 {
+		step = 1
+	}
+	out := make([]HistoryPoint, 0, maxPoints)
+	for i := 0.0; i < float64(len(pts)); i += step {
+		idx := int(i)
+		if idx >= len(pts) {
+			break
+		}
+		out = append(out, pts[idx])
+	}
+	if len(out) > 0 && out[len(out)-1].Ts != pts[len(pts)-1].Ts {
+		out = append(out, pts[len(pts)-1])
+	}
+	return out
 }
 
 func storageExportDayToS3(day string) error {
@@ -260,6 +310,14 @@ func storagePruneLocal() {
 	if time.Now().Hour() == 3 {
 		_, _ = historyDB.Exec(`VACUUM`)
 	}
+	storageWALCheckpoint()
+}
+
+func storageWALCheckpoint() {
+	if historyDB == nil {
+		return
+	}
+	_, _ = historyDB.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
 }
 
 func storageDBPath() string {

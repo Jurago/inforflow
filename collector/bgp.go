@@ -113,6 +113,9 @@ func asnDisplayName(as uint32) string {
 }
 
 func peerRoleForAS(as uint32) string {
+	if r, ok := peerRoles[as]; ok && r != "" {
+		return r
+	}
 	switch as {
 	case 26162:
 		return "ix"

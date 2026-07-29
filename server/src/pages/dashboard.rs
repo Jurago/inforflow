@@ -16,11 +16,17 @@ pub fn content() -> String {
         </div>
         <div class="header-actions">
             <div class="live-indicator"><span class="pulse-dot"></span> Ao vivo</div>
-            <a class="export-link" id="export-csv" href="/api/export?kind=stats&format=csv">Export CSV</a>
+            <a class="export-link" id="export-csv" href="#">Export CSV</a>
+            <span id="alert-badge" class="alert-badge" style="display:none"></span>
         </div>
     </header>
 
     <div id="alerts-list" class="alerts-strip fade-in-up"></div>
+
+    <section class="fade-in-up" style="animation-delay: 0.08s">
+        <h3 class="section-title">BGP <span id="bgp-summary-hint" style="font-weight:400;font-size:0.85rem;color:var(--text-muted)"></span></h3>
+        <div class="cards-grid" id="bgp-summary"></div>
+    </section>
 
     <section class="stats-grid fade-in-up" style="animation-delay: 0.05s">
         <div class="stat-card">
@@ -69,7 +75,7 @@ pub fn content() -> String {
         <div class="traffic-pipeline">
             <div class="pipeline-node origin-node">
                 <div class="node-label">Borda</div>
-                <div class="node-ip">170.245.127.191</div>
+                <div class="node-ip" data-source-ip>—</div>
             </div>
             <div class="pipeline-track" id="pipeline-track"></div>
             <div class="pipeline-node dest-node">

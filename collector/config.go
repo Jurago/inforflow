@@ -45,11 +45,11 @@ var (
 	cfgMu sync.RWMutex
 	cfg   = AppConfig{
 		SourceIP:       "170.245.127.191",
-		APIPort:        ":9090",
+		APIPort:        "127.0.0.1:9090",
 		NetFlowPort:    ":2055",
 		SNMPHost:       "170.245.127.191",
 		SNMPPort:       15161,
-		SNMPCommunity:  "infornetV2",
+		SNMPCommunity:  "",
 		SamplingRate:   0,
 		APIToken:       "",
 		DataDir:        "/var/www/html/inforflow/data",

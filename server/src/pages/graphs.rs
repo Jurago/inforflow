@@ -109,6 +109,20 @@ pub fn content() -> String {
         <div class="chart-legend chart-legend-interactive" id="legend-categories"></div>
     </section>
 
+    <section class="chart-panel chart-panel-interactive fade-in-up" style="animation-delay: 0.18s">
+        <div class="chart-panel-head">
+            <div>
+                <h3 class="section-title">Top ASNs (histórico)</h3>
+                <p class="chart-panel-desc">Mbps estimado por ASN de destino</p>
+            </div>
+        </div>
+        <div class="chart-wrap" id="wrap-asn">
+            <canvas id="chart-asn" height="280"></canvas>
+            <div class="chart-tooltip" id="tooltip-asn"></div>
+        </div>
+        <div class="chart-legend chart-legend-interactive" id="legend-asn"></div>
+    </section>
+
     <div class="graphs-bottom-row fade-in-up" style="animation-delay: 0.2s">
         <section class="chart-panel chart-panel-compact">
             <h3 class="section-title">Distribuição atual</h3>
