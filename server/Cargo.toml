@@ -1,0 +1,9 @@
+[package]
+name = "inforflow"
+version = "1.0.0"
+edition = "2021"
+description = "Inforflow - Network Flow Analysis System"
+
+[[bin]]
+name = "inforflow"
+path = "src/main.rs"
