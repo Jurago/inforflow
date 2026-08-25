@@ -21,6 +21,10 @@ func loadPeersConfig() {
 	}
 	for asnStr, ent := range raw {
 		asnStr = strings.TrimPrefix(strings.ToUpper(strings.TrimSpace(asnStr)), "AS")
+		// Metadado opcional: {"_ix": {"name":"IX.br"}} não é ASN
+		if asnStr == "_IX" || asnStr == "IX" {
+			continue
+		}
 		n, err := strconv.ParseUint(asnStr, 10, 32)
 		if err != nil {
 			continue
@@ -32,8 +36,15 @@ func loadPeersConfig() {
 		if ent.Role != "" {
 			peerRoles[as] = ent.Role
 		}
+		if ent.Role == "ix" {
+			cfgMu.Lock()
+			if cfg.IXASN == 0 || cfg.IXASN == 26162 {
+				cfg.IXASN = as
+			}
+			cfgMu.Unlock()
+		}
 	}
-	log.Printf("peers.json: %d ASNs carregados", len(raw))
+	log.Printf("peers.json: %d ASNs carregados (ix_asn=%d)", len(raw), GetConfig().IXASN)
 }
 
 type peerConfigEntry struct {

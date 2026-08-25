@@ -26,7 +26,24 @@ type feedRule struct {
 var (
 	feedMu    sync.RWMutex
 	feedRules []feedRule
+	feedStat  FeedsStatus
 )
+
+func getFeedsStatus() *FeedsStatus {
+	feedMu.RLock()
+	defer feedMu.RUnlock()
+	cp := feedStat
+	cp.Sources = append([]FeedSourceStatus(nil), feedStat.Sources...)
+	if cp.UpdatedAt > 0 {
+		now := time.Now().Unix()
+		for i := range cp.Sources {
+			if cp.Sources[i].UpdatedAt > 0 {
+				cp.Sources[i].AgeSec = now - cp.Sources[i].UpdatedAt
+			}
+		}
+	}
+	return &cp
+}
 
 func feedClassify(ip net.IP) Classified {
 	if ip == nil {
@@ -76,17 +93,25 @@ func refreshFeeds() {
 
 	var rules []feedRule
 	client := &http.Client{Timeout: 20 * time.Second}
+	sourcesStatus := []FeedSourceStatus{}
+	now := time.Now().Unix()
 
 	for _, s := range sources {
 		path := filepath.Join(dir, s.file)
+		fromCache := false
+		ok := true
 		body, err := fetchURL(client, s.url)
 		if err != nil {
 			// usa cache em disco
 			if b, e := os.ReadFile(path); e == nil {
 				body = b
+				fromCache = true
 				log.Printf("feed %s: usando cache local (%v)", s.name, err)
 			} else {
 				log.Printf("feed %s: falhou (%v)", s.name, err)
+				sourcesStatus = append(sourcesStatus, FeedSourceStatus{
+					Name: s.name, File: s.file, LastOK: false,
+				})
 				continue
 			}
 		} else {
@@ -117,10 +142,15 @@ func refreshFeeds() {
 			n++
 		}
 		log.Printf("feed %s: %d prefixos", s.name, n)
+		sourcesStatus = append(sourcesStatus, FeedSourceStatus{
+			Name: s.name, File: s.file, Prefixes: n, LastOK: ok,
+			FromCache: fromCache, UpdatedAt: now,
+		})
 	}
 
 	// Prefixos locais extras (BR / caches) em data/feeds/extra.txt
 	extra := filepath.Join(dir, "extra.txt")
+	extraN := 0
 	if b, err := os.ReadFile(extra); err == nil {
 		sc := bufio.NewScanner(strings.NewReader(string(b)))
 		for sc.Scan() {
@@ -151,11 +181,23 @@ func refreshFeeds() {
 				asn = strings.TrimSpace(parts[4])
 			}
 			rules = append(rules, feedRule{network, name, cat, icon, asn})
+			extraN++
 		}
+	}
+	if extraN >= 0 {
+		sourcesStatus = append(sourcesStatus, FeedSourceStatus{
+			Name: "extra.txt", File: "extra.txt", Prefixes: extraN,
+			LastOK: true, UpdatedAt: now,
+		})
 	}
 
 	feedMu.Lock()
 	feedRules = rules
+	feedStat = FeedsStatus{
+		TotalRules: len(rules),
+		UpdatedAt:  now,
+		Sources:    sourcesStatus,
+	}
 	feedMu.Unlock()
 	log.Printf("feeds: %d regras ativas", len(rules))
 }

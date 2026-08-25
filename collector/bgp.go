@@ -51,32 +51,46 @@ var knownASNNames = map[uint32]string{
 }
 
 type BGPPeer struct {
-	RemoteAddr  string  `json:"remote_addr"`
-	RemoteAS    uint32  `json:"remote_as"`
-	ASN         string  `json:"asn"`
-	Name        string  `json:"name"`
-	State       int     `json:"state"`
-	StateName   string  `json:"state_name"`
-	Established bool    `json:"established"`
-	PeerID      string  `json:"peer_id"`
-	InUpdates   uint64  `json:"in_updates"`
-	OutUpdates  uint64  `json:"out_updates"`
-	Role        string  `json:"role"` // ix | content | transit | regional | local | private
-	Bytes       int64   `json:"bytes"`
-	Mbps        float64 `json:"mbps"`
-	Flows       int64   `json:"flows"`
+	RemoteAddr       string  `json:"remote_addr"`
+	RemoteAS         uint32  `json:"remote_as"`
+	ASN              string  `json:"asn"`
+	Name             string  `json:"name"`
+	State            int     `json:"state"`
+	StateName        string  `json:"state_name"`
+	Established      bool    `json:"established"`
+	PeerID           string  `json:"peer_id"`
+	InUpdates        uint64  `json:"in_updates"`
+	OutUpdates       uint64  `json:"out_updates"`
+	Role             string  `json:"role"` // ix | content | transit | regional | local | private
+	Bytes            int64   `json:"bytes"`
+	Mbps             float64 `json:"mbps"`               // NetFlow amostrado (~10s)
+	MbpsScaled       float64 `json:"mbps_scaled"`        // × sampling
+	Flows            int64   `json:"flows"`
+	EstablishedSince int64   `json:"established_since,omitempty"` // unix
+	LastFlapAt       int64   `json:"last_flap_at,omitempty"`
+	FlapCount        int     `json:"flap_count,omitempty"`
+	UptimeSec        int64   `json:"uptime_sec,omitempty"`
 }
 
 type BGPSnapshot struct {
-	OK           bool      `json:"ok"`
-	LocalAS      uint32    `json:"local_as"`
-	LocalASN     string    `json:"local_asn"`
-	Total        int       `json:"total"`
-	Established  int       `json:"established"`
-	UpdatedAt    int64     `json:"updated_at"`
-	PollMs       int64     `json:"poll_ms"`
-	Peers        []BGPPeer `json:"peers"`
-	Error        string    `json:"error,omitempty"`
+	OK          bool      `json:"ok"`
+	LocalAS     uint32    `json:"local_as"`
+	LocalASN    string    `json:"local_asn"`
+	Total       int       `json:"total"`
+	Established int       `json:"established"`
+	Down        int       `json:"down"`
+	UpdatedAt   int64     `json:"updated_at"`
+	PollMs      int64     `json:"poll_ms"`
+	Peers       []BGPPeer `json:"peers"`
+	IXASN       uint32    `json:"ix_asn"`
+	Error       string    `json:"error,omitempty"`
+}
+
+type peerFlapState struct {
+	established bool
+	since       int64
+	lastFlap    int64
+	flaps       int
 }
 
 type BGPStore struct {
@@ -85,13 +99,15 @@ type BGPStore struct {
 	byIP     map[string]*BGPPeer // remote addr → peer
 	byAS     map[uint32][]*BGPPeer
 	asNames  map[uint32]string
+	flapByIP map[string]*peerFlapState
 }
 
 var bgpStore = &BGPStore{
-	byIP:    make(map[string]*BGPPeer),
-	byAS:    make(map[uint32][]*BGPPeer),
-	asNames: make(map[uint32]string),
-	snap:    BGPSnapshot{},
+	byIP:     make(map[string]*BGPPeer),
+	byAS:     make(map[uint32][]*BGPPeer),
+	asNames:  make(map[uint32]string),
+	flapByIP: make(map[string]*peerFlapState),
+	snap:     BGPSnapshot{},
 }
 
 func asnDisplayName(as uint32) string {
@@ -116,8 +132,12 @@ func peerRoleForAS(as uint32) string {
 	if r, ok := peerRoles[as]; ok && r != "" {
 		return r
 	}
+	ix := GetConfig().IXASN
+	if ix == 0 {
+		ix = 26162
+	}
 	switch as {
-	case 26162:
+	case ix:
 		return "ix"
 	case 15169, 32934, 13335, 20940, 2906, 16509, 714:
 		return "content"
@@ -132,6 +152,33 @@ func peerRoleForAS(as uint32) string {
 			return "private"
 		}
 		return "regional"
+	}
+}
+
+func (s *BGPStore) applyFlap(p *BGPPeer, now int64) {
+	st := s.flapByIP[p.RemoteAddr]
+	if st == nil {
+		st = &peerFlapState{established: p.Established, since: now}
+		if p.Established {
+			st.since = now
+		}
+		s.flapByIP[p.RemoteAddr] = st
+	} else if st.established != p.Established {
+		st.lastFlap = now
+		st.flaps++
+		st.established = p.Established
+		st.since = now
+	}
+	p.LastFlapAt = st.lastFlap
+	p.FlapCount = st.flaps
+	if p.Established {
+		p.EstablishedSince = st.since
+		if st.since > 0 {
+			p.UptimeSec = now - st.since
+		}
+	} else {
+		p.EstablishedSince = 0
+		p.UptimeSec = 0
 	}
 }
 
@@ -269,13 +316,23 @@ func pollBGPOnce() {
 		return peers[i].RemoteAddr < peers[j].RemoteAddr
 	})
 
+	now := time.Now().Unix()
+	ixASN := GetConfig().IXASN
+	if ixASN == 0 {
+		ixASN = 26162
+	}
+	bgpStore.mu.Lock()
+	for i := range peers {
+		bgpStore.applyFlap(&peers[i], now)
+	}
 	snap.Peers = peers
 	snap.Total = len(peers)
+	snap.Down = snap.Total - snap.Established
+	snap.IXASN = ixASN
 	snap.OK = true
-	snap.UpdatedAt = time.Now().Unix()
+	snap.UpdatedAt = now
 	snap.PollMs = time.Since(start).Milliseconds()
 
-	bgpStore.mu.Lock()
 	bgpStore.snap = snap
 	bgpStore.asNames = asNames
 	bgpStore.byIP = make(map[string]*BGPPeer, len(peers))
@@ -308,15 +365,18 @@ func looksLikeIPv4Index(s string) bool {
 // annotatePeersWithTraffic fills Bytes/Mbps/Flows on a copy of peers from flow aggregates.
 func annotatePeersWithTraffic(peers []BGPPeer, byASNBytes, byASNWindow map[uint32]int64, byASNFlows map[uint32]int64) []BGPPeer {
 	const windowSec = 10.0
+	eff := sampling.Get().Effective
+	if eff < 1 {
+		eff = 1
+	}
 	out := make([]BGPPeer, len(peers))
 	copy(out, peers)
-	seen := map[uint32]bool{}
 	for i := range out {
 		as := out[i].RemoteAS
 		out[i].Bytes = byASNBytes[as]
 		out[i].Flows = byASNFlows[as]
 		out[i].Mbps = float64(byASNWindow[as]) * 8 / windowSec / 1e6
-		seen[as] = true
+		out[i].MbpsScaled = out[i].Mbps * eff
 	}
 	return out
 }

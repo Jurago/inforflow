@@ -157,6 +157,10 @@ func evaluateASNAlerts(c AppConfig, snmp SNMPSnapshot) {
 	if pctLim <= 0 && mbpsLim <= 0 {
 		return
 	}
+	ignore := map[string]bool{}
+	for _, a := range c.AlertASNIgnore {
+		ignore[normalizeASNQuery(a)] = true
+	}
 	asnMbps := store.asnWindowScaledMbps()
 	uplink := (snmp.UplinkInMbps + snmp.UplinkOutMbps) / 2
 	if !snmp.OK {
@@ -164,6 +168,9 @@ func evaluateASNAlerts(c AppConfig, snmp SNMPSnapshot) {
 	}
 	active := map[string]bool{}
 	for asn, mbps := range asnMbps {
+		if ignore[normalizeASNQuery(asn)] {
+			continue
+		}
 		hit := false
 		detail := ""
 		if mbpsLim > 0 && mbps >= mbpsLim {

@@ -53,6 +53,14 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "inforflow_category_mbps_scaled{category=%q} %.4f\n", cat, mbps*samp.Effective)
 		}
 	}
+	// Top ASNs de destino (Mbps estimado)
+	for _, a := range store.GetStats().ASNBreakdown {
+		if a.MbpsScaled <= 0 {
+			continue
+		}
+		fmt.Fprintf(w, "inforflow_asn_mbps_scaled{asn=%q,name=%q,role=%q} %.4f\n",
+			a.ASN, a.Name, a.Role, a.MbpsScaled)
+	}
 	_ = c
 }
 

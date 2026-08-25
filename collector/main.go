@@ -17,7 +17,7 @@ import (
 var (
 	SourceIP   = "170.245.127.191"
 	APIPort    = ":9090"
-	MaxHistory = 800
+	MaxHistory = 2000
 )
 
 type FlowCategory string
@@ -84,22 +84,26 @@ type ServiceRate struct {
 	MbpsScaled float64 `json:"mbps_scaled"`
 	InMbps     float64 `json:"in_mbps,omitempty"`
 	OutMbps    float64 `json:"out_mbps,omitempty"`
+	IPv4Mbps   float64 `json:"ipv4_mbps,omitempty"`
+	IPv6Mbps   float64 `json:"ipv6_mbps,omitempty"`
+	Percentage float64 `json:"percentage,omitempty"`
 	Category   string  `json:"category"`
 }
 
-// ASNTraffic — tráfego agregado com destino a um ASN (NetFlow DstAS).
+// ASNTraffic — tráfego agregado por ASN (destino ou peer BGP).
 type ASNTraffic struct {
 	ASN        string  `json:"asn"`
 	Name       string  `json:"name"`
+	Role       string  `json:"role"` // "destination" | "peer"
 	Bytes      int64   `json:"bytes"`
 	Flows      int64   `json:"flows"`
-	Mbps       float64 `json:"mbps"`
-	MbpsScaled float64 `json:"mbps_scaled"`
+	Mbps       float64 `json:"mbps"`              // NetFlow amostrado (~10s)
+	MbpsScaled float64 `json:"mbps_scaled"`       // estimado × sampling
 	InMbps     float64 `json:"in_mbps,omitempty"`
 	OutMbps    float64 `json:"out_mbps,omitempty"`
 	IPv4Mbps   float64 `json:"ipv4_mbps,omitempty"`
 	IPv6Mbps   float64 `json:"ipv6_mbps,omitempty"`
-	Percentage float64 `json:"percentage"`
+	Percentage float64 `json:"percentage"` // % dos bytes acumulados do dia
 	Category   string  `json:"category"`
 	Icon       string  `json:"icon"`
 	Pending    bool    `json:"pending,omitempty"`
@@ -126,8 +130,10 @@ type AggregatedStats struct {
 	ByCategoryMbpsScaled map[string]float64    `json:"by_category_mbps_scaled,omitempty"`
 	ByCategoryInMbps     map[string]float64    `json:"by_category_in_mbps,omitempty"`
 	ByCategoryOutMbps    map[string]float64    `json:"by_category_out_mbps,omitempty"`
-	ByDestination        map[string]int64      `json:"by_destination"`
-	ByOrigin             map[string]int64      `json:"by_origin"`
+	ByDestination        map[string]int64      `json:"by_destination,omitempty"`
+	ByOrigin             map[string]int64      `json:"by_origin,omitempty"`
+	DestinationCount     int                   `json:"destination_count,omitempty"`
+	OriginCount          int                   `json:"origin_count,omitempty"`
 	TopDestinations      []DestOriginCard      `json:"top_destinations"`
 	TopOrigins           []DestOriginCard      `json:"top_origins"`
 	TopTalkers           []TalkerStats         `json:"top_talkers,omitempty"`
@@ -144,6 +150,7 @@ type AggregatedStats struct {
 	BGP                  *BGPSnapshot          `json:"bgp,omitempty"`
 	PeerBreakdown        []DestOriginCard      `json:"peer_breakdown"`
 	ASNBreakdown         []ASNTraffic          `json:"asn_breakdown,omitempty"`
+	PeerASNBreakdown     []ASNTraffic          `json:"peer_asn_breakdown,omitempty"`
 	Sampling             *SamplingEstimate     `json:"sampling,omitempty"`
 	Alerts               []Alert               `json:"alerts,omitempty"`
 	MbpsScaled           float64               `json:"mbps_scaled"`
@@ -172,33 +179,44 @@ type HistoryPoint struct {
 	ByCategoryScaled map[string]float64 `json:"by_category_mbps_scaled,omitempty"`
 	ByASN            map[string]float64 `json:"by_asn_mbps,omitempty"`
 	ByASNScaled      map[string]float64 `json:"by_asn_mbps_scaled,omitempty"`
+	ByPeerASN        map[string]float64 `json:"by_peer_asn_mbps,omitempty"`
+	ByPeerASNScaled  map[string]float64 `json:"by_peer_asn_mbps_scaled,omitempty"`
+	ByStreaming      map[string]float64 `json:"by_streaming_mbps,omitempty"`
+	ByStreamingScaled map[string]float64 `json:"by_streaming_mbps_scaled,omitempty"`
+	ByCDN            map[string]float64 `json:"by_cdn_mbps,omitempty"`
+	ByCDNScaled      map[string]float64 `json:"by_cdn_mbps_scaled,omitempty"`
+	BySNMPRole       map[string]float64 `json:"by_snmp_role_mbps,omitempty"` // soma in+out por role
+	IPv4Mbps         float64            `json:"ipv4_mbps,omitempty"`
+	IPv6Mbps         float64            `json:"ipv6_mbps,omitempty"`
 	SNMPIn           float64            `json:"snmp_in_mbps"`
 	SNMPOut          float64            `json:"snmp_out_mbps"`
 	SamplingFactor   float64            `json:"sampling_factor,omitempty"`
 }
 
 type FlowStore struct {
-	mu           sync.RWMutex
-	flows        []FlowRecord
-	stats        AggregatedStats
-	window       []rateSample
-	seq          uint64
-	started      time.Time
-	history      []HistoryPoint
-	peerASNBytes map[uint32]int64
-	peerASNFlows map[uint32]int64
-	dstASNBytes  map[uint32]int64
-	dstASNFlows  map[uint32]int64
+	mu             sync.RWMutex
+	flows          []FlowRecord
+	stats          AggregatedStats
+	window         []rateSample
+	seq            uint64
+	started        time.Time
+	history        []HistoryPoint
+	peerASNBytes   map[uint32]int64
+	peerASNFlows   map[uint32]int64
+	dstASNBytes    map[uint32]int64
+	dstASNFlows    map[uint32]int64
+	asnRecentFlows map[uint32][]FlowRecord // últimos flows por ASN destino
 }
 
 var store = &FlowStore{
-	flows:        make([]FlowRecord, 0, MaxHistory),
-	history:      make([]HistoryPoint, 0, 120),
-	started:      time.Now(),
-	peerASNBytes: make(map[uint32]int64),
-	peerASNFlows: make(map[uint32]int64),
-	dstASNBytes:  make(map[uint32]int64),
-	dstASNFlows:  make(map[uint32]int64),
+	flows:          make([]FlowRecord, 0, MaxHistory),
+	history:        make([]HistoryPoint, 0, 120),
+	started:        time.Now(),
+	peerASNBytes:   make(map[uint32]int64),
+	peerASNFlows:   make(map[uint32]int64),
+	dstASNBytes:    make(map[uint32]int64),
+	dstASNFlows:    make(map[uint32]int64),
+	asnRecentFlows: make(map[uint32][]FlowRecord),
 	stats: AggregatedStats{
 		ByCategory:     make(map[string]int64),
 		ByCategoryMbps: make(map[string]float64),
@@ -298,7 +316,7 @@ func (s *FlowStore) AddFlow(f FlowRecord) {
 		if f.Category == CategoryCDN {
 			s.stats.CDNBreakdown[svc] += f.Bytes
 		}
-		if f.Category == CategoryStreaming || f.Category == CategoryNetflix || f.Category == CategoryGlobo {
+		if f.Category == CategoryStreaming || f.Category == CategoryNetflix || f.Category == CategoryGlobo || f.Category == CategoryApple {
 			s.stats.StreamingBreak[svc] += f.Bytes
 		}
 	} else {
@@ -332,6 +350,16 @@ func (s *FlowStore) AddFlow(f FlowRecord) {
 	if dstAS > 0 {
 		s.dstASNBytes[dstAS] += f.Bytes
 		s.dstASNFlows[dstAS]++
+		ring := s.asnRecentFlows[dstAS]
+		ring = append([]FlowRecord{f}, ring...)
+		if len(ring) > 80 {
+			ring = ring[:80]
+		}
+		s.asnRecentFlows[dstAS] = ring
+		// Limita número de ASNs no índice
+		if len(s.asnRecentFlows) > 120 {
+			s.pruneASNRecentLocked()
+		}
 	}
 	cutoff := now.Add(-10 * time.Second)
 	i := 0
@@ -491,7 +519,17 @@ func (s *FlowStore) rebuildTopCards(svcBytes map[string]int64) {
 	}
 }
 
+func pruneIPKeys(m map[string]int64) {
+	for k := range m {
+		if looksLikeIP(k) {
+			delete(m, k)
+		}
+	}
+}
+
 func (s *FlowStore) refreshDerivedLocked() {
+	pruneIPKeys(s.stats.ByDestination)
+	pruneIPKeys(s.stats.ByOrigin)
 	svcBytes := map[string]int64{}
 	for _, sm := range s.window {
 		if sm.service != "" {
@@ -520,6 +558,8 @@ func (s *FlowStore) GetStats() AggregatedStats {
 	svcBytes := map[string]int64{}
 	svcIn := map[string]int64{}
 	svcOut := map[string]int64{}
+	svcV4 := map[string]int64{}
+	svcV6 := map[string]int64{}
 	var v4Bytes, v6Bytes int64
 	for _, sm := range s.window {
 		if sm.ipVersion == "6" {
@@ -534,6 +574,11 @@ func (s *FlowStore) GetStats() AggregatedStats {
 			} else {
 				svcOut[sm.service] += sm.bytes
 			}
+			if sm.ipVersion == "6" {
+				svcV6[sm.service] += sm.bytes
+			} else {
+				svcV4[sm.service] += sm.bytes
+			}
 		}
 	}
 	// rebuild feito em startDerivedRefresh(); aqui só leitura
@@ -544,8 +589,12 @@ func (s *FlowStore) GetStats() AggregatedStats {
 	out.ByCategoryInMbps = copyFloatMap(s.stats.ByCategoryInMbps)
 	out.ByCategoryOutMbps = copyFloatMap(s.stats.ByCategoryOutMbps)
 	out.ByIfaceRole = copyFloatMap(s.stats.ByIfaceRole)
-	out.ByDestination = copyMap(s.stats.ByDestination)
-	out.ByOrigin = copyMap(s.stats.ByOrigin)
+	// Não serializar maps completos (podem ter centenas de milhares de IPs) —
+	// o dashboard só precisa das contagens + top_*.
+	out.DestinationCount = len(s.stats.ByDestination)
+	out.OriginCount = len(s.stats.ByOrigin)
+	out.ByDestination = nil
+	out.ByOrigin = nil
 	out.CDNBreakdown = copyMap(s.stats.CDNBreakdown)
 	out.StreamingBreak = copyMap(s.stats.StreamingBreak)
 	out.TopDestinations = append([]DestOriginCard(nil), s.stats.TopDestinations...)
@@ -587,20 +636,31 @@ func (s *FlowStore) GetStats() AggregatedStats {
 			dstV4[sm.dstASN] += sm.bytes
 		}
 	}
-	// Inclui ASNs de peers BGP com tráfego (ex.: AS269096 N&K) mesmo quando
-	// o DstAS do flow aponta ao destino final e não ao peer de interconexão.
+	// Destino e peer ficam separados (sem merge).
 	asnBytes := copyMapUint(s.dstASNBytes)
 	asnFlows := copyMapUint(s.dstASNFlows)
-	for as, b := range s.peerASNBytes {
-		if !isVerifiedASN(as) || b <= 0 {
+	peerBytes := copyMapUint(s.peerASNBytes)
+	peerFlows := copyMapUint(s.peerASNFlows)
+
+	peerWinOnly := map[uint32]int64{}
+	peerIn := map[uint32]int64{}
+	peerOut := map[uint32]int64{}
+	peerV4 := map[uint32]int64{}
+	peerV6 := map[uint32]int64{}
+	for _, sm := range s.window {
+		if sm.peerASN == 0 {
 			continue
 		}
-		if asnBytes[as] == 0 {
-			asnBytes[as] = b
-			asnFlows[as] = s.peerASNFlows[as]
+		peerWinOnly[sm.peerASN] += sm.bytes
+		if sm.direction == "inbound" {
+			peerIn[sm.peerASN] += sm.bytes
+		} else {
+			peerOut[sm.peerASN] += sm.bytes
 		}
-		if dstWin[as] == 0 {
-			dstWin[as] = peerWin[as]
+		if sm.ipVersion == "6" {
+			peerV6[sm.peerASN] += sm.bytes
+		} else {
+			peerV4[sm.peerASN] += sm.bytes
 		}
 	}
 
@@ -662,11 +722,12 @@ func (s *FlowStore) GetStats() AggregatedStats {
 		c := classifyIP(net.ParseIP(name))
 		return string(c.Category)
 	}
-	out.StreamingRates = buildServiceRatesList(out.StreamingBreak, svcBytes, svcIn, svcOut, lookupCat, eff,
-		[]string{"streaming", "netflix", "globo"})
-	out.CDNRates = buildServiceRatesList(out.CDNBreakdown, svcBytes, svcIn, svcOut, lookupCat, eff,
+	out.StreamingRates = buildServiceRatesList(out.StreamingBreak, svcBytes, svcIn, svcOut, svcV4, svcV6, lookupCat, eff,
+		[]string{"streaming", "netflix", "globo", "apple"})
+	out.CDNRates = buildServiceRatesList(out.CDNBreakdown, svcBytes, svcIn, svcOut, svcV4, svcV6, lookupCat, eff,
 		[]string{"cdn"})
-	out.ASNBreakdown = buildASNBreakdown(asnBytes, asnFlows, dstWin, dstIn, dstOut, dstV4, dstV6, s.stats.TotalBytes, eff)
+	out.ASNBreakdown = buildASNBreakdown(asnBytes, asnFlows, dstWin, dstIn, dstOut, dstV4, dstV6, s.stats.TotalBytes, eff, "destination")
+	out.PeerASNBreakdown = buildASNBreakdown(peerBytes, peerFlows, peerWinOnly, peerIn, peerOut, peerV4, peerV6, s.stats.TotalBytes, eff, "peer")
 	for i := range out.TopDestinations {
 		out.TopDestinations[i].MbpsScaled = out.TopDestinations[i].Mbps * eff
 	}
@@ -678,7 +739,7 @@ func (s *FlowStore) GetStats() AggregatedStats {
 
 func buildServiceRatesList(
 	breakdown map[string]int64,
-	svcBytes, svcIn, svcOut map[string]int64,
+	svcBytes, svcIn, svcOut, svcV4, svcV6 map[string]int64,
 	lookup func(string) string,
 	eff float64,
 	categories []string,
@@ -689,9 +750,11 @@ func buildServiceRatesList(
 		catSet[c] = true
 	}
 	names := make(map[string]struct{})
+	var totalBytes int64
 	for k, v := range breakdown {
 		if v > 0 {
 			names[k] = struct{}{}
+			totalBytes += v
 		}
 	}
 	for name := range svcBytes {
@@ -699,11 +762,16 @@ func buildServiceRatesList(
 			names[name] = struct{}{}
 		}
 	}
+	if totalBytes <= 0 {
+		totalBytes = 1
+	}
 	out := make([]ServiceRate, 0, len(names))
 	for name := range names {
 		mbps := float64(svcBytes[name]) * 8 / windowSec / 1e6
 		inM := float64(svcIn[name]) * 8 / windowSec / 1e6
 		outM := float64(svcOut[name]) * 8 / windowSec / 1e6
+		v4M := float64(svcV4[name]) * 8 / windowSec / 1e6
+		v6M := float64(svcV6[name]) * 8 / windowSec / 1e6
 		out = append(out, ServiceRate{
 			Name:       name,
 			Bytes:      breakdown[name],
@@ -711,6 +779,9 @@ func buildServiceRatesList(
 			MbpsScaled: mbps * eff,
 			InMbps:     inM * eff,
 			OutMbps:    outM * eff,
+			IPv4Mbps:   v4M * eff,
+			IPv6Mbps:   v6M * eff,
+			Percentage: float64(breakdown[name]) / float64(totalBytes) * 100,
 			Category:   lookup(name),
 		})
 	}
@@ -728,6 +799,7 @@ func buildASNBreakdown(
 	winBytes, inBytes, outBytes, v4Bytes, v6Bytes map[uint32]int64,
 	total int64,
 	eff float64,
+	role string,
 ) []ASNTraffic {
 	const windowSec = 10.0
 	if total <= 0 {
@@ -735,6 +807,9 @@ func buildASNBreakdown(
 	}
 	if eff < 1 {
 		eff = 1
+	}
+	if role == "" {
+		role = "destination"
 	}
 	seen := map[uint32]struct{}{}
 	for as := range byBytes {
@@ -762,6 +837,9 @@ func buildASNBreakdown(
 		}
 		cat := "other"
 		icon := "peer"
+		if role == "peer" {
+			cat = "peer"
+		}
 		if c := classifyByASN(as); c.Name != "" {
 			cat = string(c.Category)
 			icon = c.Icon
@@ -770,13 +848,16 @@ func buildASNBreakdown(
 			}
 		} else if p, ok := bgpStore.LookupAS(as); ok && verified {
 			name = p.Name
-			cat = "peer"
+			if role == "peer" {
+				cat = "peer"
+			}
 		} else if n := ipapi.NameForASN(as); n != "" && verified {
 			name = n
 		}
 		out = append(out, ASNTraffic{
 			ASN:        fmt.Sprintf("AS%d", as),
 			Name:       name,
+			Role:       role,
 			Bytes:      bytes,
 			Flows:      byFlows[as],
 			Mbps:       mbps,
@@ -800,6 +881,40 @@ func buildASNBreakdown(
 	if len(out) > 40 {
 		out = out[:40]
 	}
+	return out
+}
+
+func (s *FlowStore) pruneASNRecentLocked() {
+	type kv struct {
+		as uint32
+		n  int
+	}
+	ranked := make([]kv, 0, len(s.asnRecentFlows))
+	for as, ring := range s.asnRecentFlows {
+		ranked = append(ranked, kv{as, len(ring)})
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].n < ranked[j].n })
+	for len(s.asnRecentFlows) > 100 && len(ranked) > 0 {
+		delete(s.asnRecentFlows, ranked[0].as)
+		ranked = ranked[1:]
+	}
+}
+
+func (s *FlowStore) GetASNRecentFlows(as uint32, limit int) []FlowRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	ring := s.asnRecentFlows[as]
+	if len(ring) == 0 {
+		return nil
+	}
+	if len(ring) > limit {
+		ring = ring[:limit]
+	}
+	out := make([]FlowRecord, len(ring))
+	copy(out, ring)
 	return out
 }
 
@@ -840,6 +955,10 @@ func buildPeerBreakdown(peers []BGPPeer, total int64) []DestOriginCard {
 	if total <= 0 {
 		total = 1
 	}
+	eff := sampling.Get().Effective
+	if eff < 1 {
+		eff = 1
+	}
 	// Aggregate by ASN (multiple sessions per AS)
 	type agg struct {
 		name, asn, role string
@@ -855,7 +974,10 @@ func buildPeerBreakdown(peers []BGPPeer, total int64) []DestOriginCard {
 			m[p.RemoteAS] = a
 		}
 		a.bytes += p.Bytes
-		a.mbps += p.Mbps
+		// Mbps already shared per ASN in annotate — take max to avoid multi-session multiply
+		if p.Mbps > a.mbps {
+			a.mbps = p.Mbps
+		}
 		if p.Established {
 			a.est = true
 		}
@@ -866,21 +988,19 @@ func buildPeerBreakdown(peers []BGPPeer, total int64) []DestOriginCard {
 			continue
 		}
 		cat := "peer"
-		if a.role == "content" {
-			cat = "peer"
-		}
 		out = append(out, DestOriginCard{
 			Name:       a.name + " (" + a.asn + ")",
 			Bytes:      a.bytes,
 			Mbps:       a.mbps,
+			MbpsScaled: a.mbps * eff,
 			Percentage: float64(a.bytes) / float64(total) * 100,
 			Category:   cat,
 			Icon:       "peer",
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Bytes == out[j].Bytes {
-			return out[i].Mbps > out[j].Mbps
+		if out[i].MbpsScaled != out[j].MbpsScaled {
+			return out[i].MbpsScaled > out[j].MbpsScaled
 		}
 		return out[i].Bytes > out[j].Bytes
 	})
@@ -939,10 +1059,14 @@ func (s *FlowStore) pushHistory() {
 		scaledCats[k] = v * eff
 	}
 	asnWin := map[uint32]int64{}
+	peerWin := map[uint32]int64{}
 	var v4b, v6b int64
 	for _, sm := range s.window {
 		if sm.dstASN > 0 {
 			asnWin[sm.dstASN] += sm.bytes
+		}
+		if sm.peerASN > 0 {
+			peerWin[sm.peerASN] += sm.bytes
 		}
 		if sm.ipVersion == "6" {
 			v6b += sm.bytes
@@ -951,44 +1075,157 @@ func (s *FlowStore) pushHistory() {
 		}
 	}
 	const ws = 10.0
-	byASN := make(map[string]float64, len(asnWin))
-	byASNScaled := make(map[string]float64, len(asnWin))
-	type asnKV struct {
+	c := GetConfig()
+	topN := c.ASNHistoryTop
+	if topN <= 0 {
+		topN = 30
+	}
+	watched := map[uint32]bool{}
+	for _, w := range c.ASNWatched {
+		if as := parseASNNum(w); as > 0 {
+			watched[as] = true
+		}
+	}
+
+	rankASNMap := func(win map[uint32]int64) (map[string]float64, map[string]float64) {
+		type asnKV struct {
+			as uint32
+			v  float64
+		}
+		ranked := make([]asnKV, 0, len(win))
+		for as, b := range win {
+			ranked = append(ranked, asnKV{as, float64(b) * 8 / ws / 1e6})
+		}
+		sort.Slice(ranked, func(i, j int) bool { return ranked[i].v > ranked[j].v })
+		keep := map[uint32]float64{}
+		for i, kv := range ranked {
+			if i < topN || watched[kv.as] {
+				keep[kv.as] = kv.v
+			}
+		}
+		for as := range watched {
+			if _, ok := keep[as]; !ok {
+				if b, ok2 := win[as]; ok2 {
+					keep[as] = float64(b) * 8 / ws / 1e6
+				}
+			}
+		}
+		by := make(map[string]float64, len(keep))
+		byS := make(map[string]float64, len(keep))
+		for as, v := range keep {
+			key := fmt.Sprintf("AS%d", as)
+			by[key] = v
+			byS[key] = v * eff
+		}
+		return by, byS
+	}
+
+	byASN, byASNScaled := rankASNMap(asnWin)
+	byPeer, byPeerScaled := rankASNMap(peerWin)
+
+	// Top serviços de streaming na janela
+	streamWin := map[string]int64{}
+	streamCats := map[string]bool{"streaming": true, "netflix": true, "globo": true, "apple": true}
+	for _, sm := range s.window {
+		if sm.service == "" || !streamCats[sm.category] {
+			continue
+		}
+		streamWin[sm.service] += sm.bytes
+	}
+	type skv struct {
 		k string
 		v float64
 	}
-	ranked := make([]asnKV, 0, len(asnWin))
-	for as, b := range asnWin {
-		mbps := float64(b) * 8 / ws / 1e6
-		key := fmt.Sprintf("AS%d", as)
-		ranked = append(ranked, asnKV{key, mbps})
+	sranked := make([]skv, 0, len(streamWin))
+	for k, b := range streamWin {
+		sranked = append(sranked, skv{k, float64(b) * 8 / ws / 1e6})
 	}
-	sort.Slice(ranked, func(i, j int) bool { return ranked[i].v > ranked[j].v })
-	if len(ranked) > 15 {
-		ranked = ranked[:15]
+	sort.Slice(sranked, func(i, j int) bool { return sranked[i].v > sranked[j].v })
+	if len(sranked) > 12 {
+		sranked = sranked[:12]
 	}
-	for _, kv := range ranked {
-		byASN[kv.k] = kv.v
-		byASNScaled[kv.k] = kv.v * eff
+	byStream := make(map[string]float64, len(sranked))
+	byStreamScaled := make(map[string]float64, len(sranked))
+	for _, kv := range sranked {
+		byStream[kv.k] = kv.v
+		byStreamScaled[kv.k] = kv.v * eff
 	}
+
+	// Top CDNs na janela (+ watchlist)
+	cdnWin := map[string]int64{}
+	for _, sm := range s.window {
+		if sm.service == "" || sm.category != "cdn" {
+			continue
+		}
+		cdnWin[sm.service] += sm.bytes
+	}
+	cranked := make([]skv, 0, len(cdnWin))
+	for k, b := range cdnWin {
+		cranked = append(cranked, skv{k, float64(b) * 8 / ws / 1e6})
+	}
+	sort.Slice(cranked, func(i, j int) bool { return cranked[i].v > cranked[j].v })
+	cdnTopN := 12
+	watchedCDN := map[string]bool{}
+	for _, w := range c.CDNWatched {
+		watchedCDN[strings.TrimSpace(w)] = true
+	}
+	byCDN := make(map[string]float64)
+	byCDNScaled := make(map[string]float64)
+	for i, kv := range cranked {
+		if i < cdnTopN || watchedCDN[kv.k] {
+			byCDN[kv.k] = kv.v
+			byCDNScaled[kv.k] = kv.v * eff
+		}
+	}
+	for name := range watchedCDN {
+		if _, ok := byCDN[name]; ok {
+			continue
+		}
+		if b, ok := cdnWin[name]; ok {
+			v := float64(b) * 8 / ws / 1e6
+			byCDN[name] = v
+			byCDNScaled[name] = v * eff
+		}
+	}
+
+	byRole := map[string]float64{}
+	for _, iface := range snmp.Interfaces {
+		if iface.OperStatus != 1 || iface.Role == "" {
+			continue
+		}
+		byRole[iface.Role] += iface.InMbps + iface.OutMbps
+	}
+	v4Mbps := float64(v4b) * 8 / ws / 1e6 * eff
+	v6Mbps := float64(v6b) * 8 / ws / 1e6 * eff
+
 	pt := HistoryPoint{
-		Ts:               time.Now().Unix(),
-		Mbps:             s.stats.Mbps,
-		MbpsScaled:       s.stats.Mbps * eff,
-		ByCategory:       cats,
-		ByCategoryScaled: scaledCats,
-		ByASN:            byASN,
-		ByASNScaled:      byASNScaled,
-		SNMPIn:           snmp.UplinkInMbps,
-		SNMPOut:          snmp.UplinkOutMbps,
-		SamplingFactor:   eff,
+		Ts:                time.Now().Unix(),
+		Mbps:              s.stats.Mbps,
+		MbpsScaled:        s.stats.Mbps * eff,
+		ByCategory:        cats,
+		ByCategoryScaled:  scaledCats,
+		ByASN:             byASN,
+		ByASNScaled:       byASNScaled,
+		ByPeerASN:         byPeer,
+		ByPeerASNScaled:   byPeerScaled,
+		ByStreaming:       byStream,
+		ByStreamingScaled: byStreamScaled,
+		ByCDN:             byCDN,
+		ByCDNScaled:       byCDNScaled,
+		BySNMPRole:        byRole,
+		IPv4Mbps:          v4Mbps,
+		IPv6Mbps:          v6Mbps,
+		SNMPIn:            snmp.UplinkInMbps,
+		SNMPOut:           snmp.UplinkOutMbps,
+		SamplingFactor:    eff,
 	}
 	s.history = append(s.history, pt)
 	if len(s.history) > 120 {
 		s.history = s.history[len(s.history)-120:]
 	}
-	go storageEnqueue(pt, float64(v4b)*8/ws/1e6*eff, float64(v6b)*8/ws/1e6*eff)
+	go storageEnqueue(pt, v4Mbps, v6Mbps)
 	go persistASNDaily()
+	go snmpStore.pushIfaceHistory(snmp)
 }
 
 func startHistorySampler() {
@@ -1402,25 +1639,75 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 			hasHours = true
 		}
 	}
-	// Ao vivo (sem filtro): só memória (~10 min) — evita carregar 30d do SQLite/S3.
-	if !hasSince && !hasHours {
-		writeJSON(w, store.GetHistory())
-		return
-	}
-	pts := queryHistorySince(since)
-	if len(pts) == 0 {
-		mem := store.GetHistory()
-		if since > 0 {
-			for _, pt := range mem {
-				if pt.Ts >= since {
-					pts = append(pts, pt)
-				}
-			}
-		} else {
-			pts = mem
+	if from := r.URL.Query().Get("from"); from != "" {
+		if n, err := strconv.ParseInt(from, 10, 64); err == nil && n > 0 {
+			since = n
+			hasSince = true
 		}
 	}
+	until := int64(0)
+	if to := r.URL.Query().Get("to"); to != "" {
+		if n, err := strconv.ParseInt(to, 10, 64); err == nil && n > 0 {
+			until = n
+		}
+	}
+	maxPoints := 0
+	if v := r.URL.Query().Get("max_points"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxPoints = n
+			if maxPoints > 5000 {
+				maxPoints = 5000
+			}
+		}
+	}
+	// Ao vivo (sem filtro): só memória (~10 min) — evita carregar 30d do SQLite/S3.
+	var pts []HistoryPoint
+	if !hasSince && !hasHours {
+		pts = store.GetHistory()
+	} else {
+		pts = queryHistorySince(since)
+		if len(pts) == 0 {
+			mem := store.GetHistory()
+			if since > 0 {
+				for _, pt := range mem {
+					if pt.Ts >= since {
+						pts = append(pts, pt)
+					}
+				}
+			} else {
+				pts = mem
+			}
+		}
+	}
+	if until > 0 {
+		filtered := pts[:0]
+		for _, pt := range pts {
+			if pt.Ts <= until {
+				filtered = append(filtered, pt)
+			}
+		}
+		pts = filtered
+	}
+	if maxPoints > 0 {
+		pts = downsampleHistoryPoints(pts, maxPoints)
+	}
 	writeJSON(w, pts)
+}
+
+func downsampleHistoryPoints(pts []HistoryPoint, max int) []HistoryPoint {
+	if max <= 0 || len(pts) <= max {
+		return pts
+	}
+	out := make([]HistoryPoint, 0, max)
+	n := len(pts)
+	for i := 0; i < max; i++ {
+		idx := i * (n - 1) / (max - 1)
+		out = append(out, pts[idx])
+	}
+	if out[len(out)-1].Ts != pts[n-1].Ts {
+		out[len(out)-1] = pts[n-1]
+	}
+	return out
 }
 
 func handleAlerts(w http.ResponseWriter, r *http.Request) {
@@ -1457,25 +1744,79 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Disposition", "attachment; filename=inforflow-"+kind+".csv")
 		switch kind {
 		case "cdn":
-			fmt.Fprintln(w, "name,bytes")
-			for k, v := range stats.CDNBreakdown {
-				fmt.Fprintf(w, "%s,%d\n", k, v)
+			fmt.Fprintln(w, "name,asn,category,bytes,mbps,mbps_scaled,in_mbps,out_mbps,ipv4_mbps,ipv6_mbps,percentage")
+			for _, r := range enrichCDNRates(stats.CDNRates) {
+				fmt.Fprintf(w, "%s,%s,%s,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f\n",
+					csvEscape(r.Name), r.ASN, r.Category, r.Bytes, r.Mbps, r.MbpsScaled,
+					r.InMbps, r.OutMbps, r.IPv4Mbps, r.IPv6Mbps, r.Percentage)
+			}
+		case "router":
+			fmt.Fprintln(w, "index,name,alias,role,oper_status,speed_mbps,in_mbps,out_mbps,in_util_pct,out_util_pct")
+			snmp := snmpStore.Get()
+			for _, i := range snmp.Interfaces {
+				fmt.Fprintf(w, "%d,%s,%s,%s,%d,%d,%.4f,%.4f,%.2f,%.2f\n",
+					i.Index, csvEscape(i.Name), csvEscape(i.Alias), i.Role, i.OperStatus, i.SpeedMbps,
+					i.InMbps, i.OutMbps, i.InUtilPct, i.OutUtilPct)
+			}
+		case "history":
+			fmt.Fprintln(w, "ts,mbps,mbps_scaled,snmp_in,snmp_out,ipv4_mbps,ipv6_mbps,sampling_factor")
+			hours := 6
+			if v := r.URL.Query().Get("hours"); v != "" {
+				if h, err := strconv.Atoi(v); err == nil && h > 0 {
+					hours = h
+				}
+			}
+			since := time.Now().Unix() - int64(hours)*3600
+			pts := queryHistorySince(since)
+			if len(pts) == 0 {
+				pts = store.GetHistory()
+			}
+			pts = downsampleHistoryPoints(pts, 2000)
+			for _, p := range pts {
+				fmt.Fprintf(w, "%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f\n",
+					p.Ts, p.Mbps, p.MbpsScaled, p.SNMPIn, p.SNMPOut, p.IPv4Mbps, p.IPv6Mbps, p.SamplingFactor)
 			}
 		case "streaming":
-			fmt.Fprintln(w, "name,bytes")
-			for k, v := range stats.StreamingBreak {
-				fmt.Fprintf(w, "%s,%d\n", k, v)
+			fmt.Fprintln(w, "name,category,bytes,mbps,mbps_scaled,in_mbps,out_mbps,ipv4_mbps,ipv6_mbps,percentage")
+			for _, r := range stats.StreamingRates {
+				fmt.Fprintf(w, "%s,%s,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f\n",
+					csvEscape(r.Name), r.Category, r.Bytes, r.Mbps, r.MbpsScaled,
+					r.InMbps, r.OutMbps, r.IPv4Mbps, r.IPv6Mbps, r.Percentage)
 			}
 		case "peers":
-			fmt.Fprintln(w, "name,bytes,mbps")
-			for _, p := range stats.PeerBreakdown {
-				fmt.Fprintf(w, "%s,%d,%.4f\n", p.Name, p.Bytes, p.Mbps)
+			fmt.Fprintln(w, "remote_addr,asn,name,state,role,established,mbps,mbps_scaled,bytes,flows,in_updates,out_updates,uptime_sec,flap_count,last_flap_at")
+			bgp := bgpStore.Get()
+			store.mu.RLock()
+			peerWin := map[uint32]int64{}
+			for _, sm := range store.window {
+				if sm.peerASN > 0 {
+					peerWin[sm.peerASN] += sm.bytes
+				}
+			}
+			peers := annotatePeersWithTraffic(bgp.Peers, store.peerASNBytes, peerWin, store.peerASNFlows)
+			store.mu.RUnlock()
+			for _, p := range peers {
+				est := 0
+				if p.Established {
+					est = 1
+				}
+				fmt.Fprintf(w, "%s,%s,%s,%s,%s,%d,%.4f,%.4f,%d,%d,%d,%d,%d,%d,%d\n",
+					p.RemoteAddr, p.ASN, csvEscape(p.Name), p.StateName, p.Role, est,
+					p.Mbps, p.MbpsScaled, p.Bytes, p.Flows, p.InUpdates, p.OutUpdates,
+					p.UptimeSec, p.FlapCount, p.LastFlapAt)
 			}
 		case "asn":
-			fmt.Fprintln(w, "asn,name,bytes,flows,mbps,mbps_scaled,percentage")
-			for _, a := range stats.ASNBreakdown {
-				fmt.Fprintf(w, "%s,%s,%d,%d,%.4f,%.4f,%.2f\n",
-					a.ASN, a.Name, a.Bytes, a.Flows, a.Mbps, a.MbpsScaled, a.Percentage)
+			fmt.Fprintln(w, "asn,name,role,bytes,flows,mbps,mbps_scaled,in_mbps,out_mbps,ipv4_mbps,ipv6_mbps,percentage,pending")
+			all := append([]ASNTraffic{}, stats.ASNBreakdown...)
+			all = append(all, stats.PeerASNBreakdown...)
+			for _, a := range all {
+				pending := 0
+				if a.Pending {
+					pending = 1
+				}
+				fmt.Fprintf(w, "%s,%s,%s,%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%d\n",
+					a.ASN, csvEscape(a.Name), a.Role, a.Bytes, a.Flows, a.Mbps, a.MbpsScaled,
+					a.InMbps, a.OutMbps, a.IPv4Mbps, a.IPv6Mbps, a.Percentage, pending)
 			}
 		case "talkers":
 			fmt.Fprintln(w, "ip,bytes,mbps_scaled,top_category,flows")
@@ -1488,10 +1829,34 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 				fmt.Fprintf(w, "%d,%s,%s,%s,%d,%s,%s\n",
 					f.Timestamp, f.SrcIP, f.DstIP, f.Category, f.Bytes, f.ASN, f.PeerASN)
 			}
-		default:
-			fmt.Fprintln(w, "category,bytes,mbps")
+		case "dashboard":
+			fallthrough
+		case "stats":
+			fmt.Fprintln(w, "section,key,value")
+			fmt.Fprintf(w, "kpi,mbps,%.4f\n", stats.Mbps)
+			fmt.Fprintf(w, "kpi,mbps_scaled,%.4f\n", stats.MbpsScaled)
+			fmt.Fprintf(w, "kpi,ipv4_mbps,%.4f\n", stats.IPv4Mbps)
+			fmt.Fprintf(w, "kpi,ipv6_mbps,%.4f\n", stats.IPv6Mbps)
+			if stats.SNMP != nil {
+				fmt.Fprintf(w, "kpi,snmp_in,%.4f\n", stats.SNMP.UplinkInMbps)
+				fmt.Fprintf(w, "kpi,snmp_out,%.4f\n", stats.SNMP.UplinkOutMbps)
+			}
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "category,bytes,mbps,mbps_scaled,percentage")
 			for _, c := range stats.Consumption {
-				fmt.Fprintf(w, "%s,%d,%.4f\n", c.Category, c.Bytes, c.Mbps)
+				fmt.Fprintf(w, "%s,%d,%.4f,%.4f,%.2f\n", c.Category, c.Bytes, c.Mbps, c.MbpsScaled, c.Percentage)
+			}
+			fmt.Fprintln(w, "")
+			fmt.Fprintln(w, "talker_ip,bytes,mbps_scaled,top_category,flows")
+			for _, t := range talkers.Top(30) {
+				fmt.Fprintf(w, "%s,%d,%.4f,%s,%d\n", t.IP, t.Bytes, t.MbpsScaled, t.TopCat, t.Flows)
+			}
+			if stats.BGP != nil {
+				fmt.Fprintln(w, "")
+				fmt.Fprintln(w, "bgp_asn,name,state,role,mbps_scaled")
+				for _, p := range stats.BGP.Peers {
+					fmt.Fprintf(w, "%s,%s,%s,%s,%.4f\n", p.ASN, csvEscape(p.Name), p.StateName, p.Role, p.MbpsScaled)
+				}
 			}
 		}
 		return
@@ -1502,11 +1867,14 @@ func handleExport(w http.ResponseWriter, r *http.Request) {
 	case "cdn":
 		writeJSON(w, stats.CDNBreakdown)
 	case "streaming":
-		writeJSON(w, stats.StreamingBreak)
+		writeJSON(w, stats.StreamingRates)
 	case "peers":
 		writeJSON(w, stats.PeerBreakdown)
 	case "asn":
-		writeJSON(w, stats.ASNBreakdown)
+		writeJSON(w, map[string]interface{}{
+			"destinations": stats.ASNBreakdown,
+			"peers":        stats.PeerASNBreakdown,
+		})
 	case "flows":
 		writeJSON(w, store.GetRecentFlows(200))
 	case "bgp":
@@ -1604,8 +1972,11 @@ func main() {
 	mux.HandleFunc("/api/health", handleHealth)
 	mux.HandleFunc("/metrics", handleMetrics)
 	mux.HandleFunc("/api/stats", requireAuth(handleStats))
+	mux.HandleFunc("/api/dashboard", requireAuth(handleDashboardPage))
 	mux.HandleFunc("/api/flows", requireAuth(handleFlows))
 	mux.HandleFunc("/api/snmp", requireAuth(handleSNMP))
+	mux.HandleFunc("/api/router", requireAuth(handleRouterPage))
+	mux.HandleFunc("/api/router/detail", requireAuth(handleRouterDetail))
 	mux.HandleFunc("/api/bgp", requireAuth(handleBGP))
 	mux.HandleFunc("/api/history", requireAuth(handleHistory))
 	mux.HandleFunc("/api/history/compare", requireAuth(handleHistoryCompare))
@@ -1616,9 +1987,19 @@ func main() {
 	mux.HandleFunc("/api/storage", requireAuth(handleStorage))
 	mux.HandleFunc("/api/ipapi", requireAuth(handleIPAPI))
 	mux.HandleFunc("/api/export", requireAuth(handleExport))
+	mux.HandleFunc("/api/asn", requireAuth(handleASN))
+	mux.HandleFunc("/api/asn/daily", requireAuth(handleASNDaily))
+	mux.HandleFunc("/api/asn/detail", requireAuth(handleASNDetail))
+	mux.HandleFunc("/api/cdn", requireAuth(handleCDNPage))
+	mux.HandleFunc("/api/cdn/detail", requireAuth(handleCDNDetail))
+	mux.HandleFunc("/api/streaming", requireAuth(handleStreamingPage))
+	mux.HandleFunc("/api/streaming/detail", requireAuth(handleStreamingDetail))
+	mux.HandleFunc("/api/peers", requireAuth(handlePeersPage))
+	mux.HandleFunc("/api/peers/detail", requireAuth(handlePeersDetail))
 	mux.HandleFunc("/api/login", handleLogin)
 	mux.HandleFunc("/api/logout", handleLogout)
 	mux.HandleFunc("/api/auth/check", handleAuthCheck)
 
+	StartASNDigest()
 	log.Fatal(http.ListenAndServe(APIPort, mux))
 }

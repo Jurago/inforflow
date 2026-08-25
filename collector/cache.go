@@ -47,7 +47,7 @@ func computeCacheHit() CacheHitSnapshot {
 		}
 	}
 
-	streaming := scaled["streaming"] + scaled["netflix"] + scaled["globo"]
+	streaming := scaled["streaming"] + scaled["netflix"] + scaled["globo"] + scaled["apple"]
 	cdn := scaled["cdn"]
 	cacheTotal := cacheIn + cacheOut
 	hitPct := 0.0

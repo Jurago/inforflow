@@ -25,6 +25,12 @@ type AppConfig struct {
 	AlertUtilPct   float64 `json:"alert_util_pct"`
 	AlertASNPct    float64 `json:"alert_asn_pct"`   // % do uplink SNMP por ASN (0=desliga)
 	AlertASNMbps   float64 `json:"alert_asn_mbps"`  // Mbps absoluto por ASN (0=só %)
+	AlertASNIgnore []string `json:"alert_asn_ignore"` // ASNs ignorados em asn_high_* (ex.: AS15169)
+	ASNHistoryTop  int      `json:"asn_history_top"`  // top-N por amostra no histórico (padrão 30)
+	ASNWatched     []string `json:"asn_watched"`      // ASNs sempre mantidos no histórico
+	CDNWatched     []string `json:"cdn_watched"`      // CDNs sempre mantidos no histórico
+	ASNDigestHour  int      `json:"asn_digest_hour"`  // hora local do digest diário (0-23; -1=off)
+	IXASN          uint32   `json:"ix_asn"`           // ASN do IX (padrão 26162 IX.br)
 	FeedIntervalM  int     `json:"feed_interval_min"`
 	HistoryRetainH int     `json:"history_retain_hours"` // legado: local
 	HistoryLocalH  int     `json:"history_local_hours"`  // VM: padrão 72 (3d)
@@ -56,6 +62,20 @@ var (
 		AlertUtilPct:   80,
 		AlertASNPct:    25,
 		AlertASNMbps:   500,
+		AlertASNIgnore: []string{
+			"AS15169", // Google
+			"AS32934", // Meta
+			"AS13335", // Cloudflare
+			"AS16509", // Amazon
+			"AS8075",  // Microsoft
+			"AS2906",  // Netflix
+			"AS20940", // Akamai
+		},
+		ASNHistoryTop: 30,
+		ASNWatched:    nil,
+		CDNWatched:    []string{"Cloudflare", "Akamai", "Google Cache", "AWS CloudFront", "Fastly"},
+		ASNDigestHour: 8,
+		IXASN:         26162,
 		FeedIntervalM:  360,
 		HistoryRetainH: 72,
 		HistoryLocalH:  72,
@@ -176,6 +196,20 @@ func LoadConfig(path string) {
 	}
 	if cfg.HistoryS3Days <= 0 {
 		cfg.HistoryS3Days = 30
+	}
+	if cfg.ASNHistoryTop <= 0 {
+		cfg.ASNHistoryTop = 30
+	}
+	if cfg.ASNDigestHour < -1 || cfg.ASNDigestHour > 23 {
+		cfg.ASNDigestHour = 8
+	}
+	if cfg.AlertASNIgnore == nil {
+		cfg.AlertASNIgnore = []string{
+			"AS15169", "AS32934", "AS13335", "AS16509", "AS8075", "AS2906", "AS20940",
+		}
+	}
+	if cfg.IXASN == 0 {
+		cfg.IXASN = 26162
 	}
 	_ = os.MkdirAll(cfg.DataDir, 0755)
 

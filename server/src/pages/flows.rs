@@ -14,6 +14,9 @@ pub fn content() -> String {
             <h2 class="page-title">Explorador de Flows</h2>
             <p class="page-subtitle">Busca por IP, categoria ou texto · drill-down em tempo real</p>
         </div>
+        <div class="header-actions">
+            <span class="sampling-chip" id="page-sampling-chip">fator —</span>
+        </div>
     </header>
     <section class="flow-search-bar fade-in-up">
         <input type="text" id="flow-q" class="login-input" placeholder="Busca livre (IP, ASN, serviço…)" />
@@ -35,13 +38,15 @@ pub fn content() -> String {
         <span id="flow-filter-hint" class="section-hint" style="margin:0"></span>
     </section>
     <section class="flow-table-section fade-in-up">
-        <table class="flow-table">
-            <thead><tr>
-                <th>Hora</th><th>Cat.</th><th>Origem → Destino</th><th>Serviço</th><th>Dst ASN</th>
-                <th>Peer ASN</th><th>Interface</th><th>Next-hop</th><th>Portas</th><th>Bytes</th><th>Dir</th><th>IP</th>
-            </tr></thead>
-            <tbody id="flows-body"></tbody>
-        </table>
+        <div class="flow-table-wrapper">
+            <table class="flow-table">
+                <thead><tr>
+                    <th>Hora</th><th>Cat.</th><th>Origem → Destino</th><th>Serviço</th><th>Dst ASN</th>
+                    <th>Bytes</th><th>Mbps est.</th><th>Dir.</th>
+                </tr></thead>
+                <tbody id="flows-body"></tbody>
+            </table>
+        </div>
     </section>
     "##.to_string()
 }

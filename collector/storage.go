@@ -89,7 +89,14 @@ CREATE TABLE IF NOT EXISTS history_raw (
   ipv4_mbps REAL NOT NULL DEFAULT 0,
   ipv6_mbps REAL NOT NULL DEFAULT 0,
   by_asn TEXT NOT NULL DEFAULT '{}',
-  by_asn_scaled TEXT NOT NULL DEFAULT '{}'
+  by_asn_scaled TEXT NOT NULL DEFAULT '{}',
+  by_peer_asn TEXT NOT NULL DEFAULT '{}',
+  by_peer_asn_scaled TEXT NOT NULL DEFAULT '{}',
+  by_streaming TEXT NOT NULL DEFAULT '{}',
+  by_streaming_scaled TEXT NOT NULL DEFAULT '{}',
+  by_cdn TEXT NOT NULL DEFAULT '{}',
+  by_cdn_scaled TEXT NOT NULL DEFAULT '{}',
+  by_snmp_role TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_history_raw_ts ON history_raw(ts);
 CREATE TABLE IF NOT EXISTS s3_exported (
@@ -105,6 +112,13 @@ CREATE TABLE IF NOT EXISTS s3_exported (
 		for _, col := range []string{
 			`ALTER TABLE history_raw ADD COLUMN by_asn TEXT NOT NULL DEFAULT '{}'`,
 			`ALTER TABLE history_raw ADD COLUMN by_asn_scaled TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_peer_asn TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_peer_asn_scaled TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_streaming TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_streaming_scaled TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_cdn TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_cdn_scaled TEXT NOT NULL DEFAULT '{}'`,
+			`ALTER TABLE history_raw ADD COLUMN by_snmp_role TEXT NOT NULL DEFAULT '{}'`,
 		} {
 			_, _ = db.Exec(col)
 		}
@@ -122,11 +136,26 @@ func storageInsert(pt HistoryPoint, ipv4Mbps, ipv6Mbps float64) {
 	scaledB, _ := json.Marshal(pt.ByCategoryScaled)
 	asnB, _ := json.Marshal(pt.ByASN)
 	asnScaledB, _ := json.Marshal(pt.ByASNScaled)
+	peerB, _ := json.Marshal(pt.ByPeerASN)
+	peerScaledB, _ := json.Marshal(pt.ByPeerASNScaled)
+	streamB, _ := json.Marshal(pt.ByStreaming)
+	streamScaledB, _ := json.Marshal(pt.ByStreamingScaled)
+	cdnB, _ := json.Marshal(pt.ByCDN)
+	cdnScaledB, _ := json.Marshal(pt.ByCDNScaled)
+	roleB, _ := json.Marshal(pt.BySNMPRole)
+	if ipv4Mbps == 0 && pt.IPv4Mbps > 0 {
+		ipv4Mbps = pt.IPv4Mbps
+	}
+	if ipv6Mbps == 0 && pt.IPv6Mbps > 0 {
+		ipv6Mbps = pt.IPv6Mbps
+	}
 	_, err := historyDB.Exec(`INSERT OR REPLACE INTO history_raw
-		(ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor, by_category, by_category_scaled, ipv4_mbps, ipv6_mbps, by_asn, by_asn_scaled)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		(ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor, by_category, by_category_scaled, ipv4_mbps, ipv6_mbps, by_asn, by_asn_scaled, by_peer_asn, by_peer_asn_scaled, by_streaming, by_streaming_scaled, by_cdn, by_cdn_scaled, by_snmp_role)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		pt.Ts, pt.Mbps, pt.MbpsScaled, pt.SNMPIn, pt.SNMPOut, pt.SamplingFactor,
-		string(catB), string(scaledB), ipv4Mbps, ipv6Mbps, string(asnB), string(asnScaledB))
+		string(catB), string(scaledB), ipv4Mbps, ipv6Mbps, string(asnB), string(asnScaledB),
+		string(peerB), string(peerScaledB), string(streamB), string(streamScaledB),
+		string(cdnB), string(cdnScaledB), string(roleB))
 	if err != nil {
 		log.Printf("sqlite insert: %v", err)
 	}
@@ -141,7 +170,12 @@ func storageQueryLocal(since int64) []HistoryPoint {
 		since = localCutoff
 	}
 	q := `SELECT ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor, by_category, by_category_scaled,
-		COALESCE(by_asn, '{}'), COALESCE(by_asn_scaled, '{}')
+		COALESCE(ipv4_mbps, 0), COALESCE(ipv6_mbps, 0),
+		COALESCE(by_asn, '{}'), COALESCE(by_asn_scaled, '{}'),
+		COALESCE(by_peer_asn, '{}'), COALESCE(by_peer_asn_scaled, '{}'),
+		COALESCE(by_streaming, '{}'), COALESCE(by_streaming_scaled, '{}'),
+		COALESCE(by_cdn, '{}'), COALESCE(by_cdn_scaled, '{}'),
+		COALESCE(by_snmp_role, '{}')
 		FROM history_raw WHERE ts >= ? ORDER BY ts`
 	rows, err := historyDB.Query(q, since)
 	if err != nil {
@@ -151,17 +185,63 @@ func storageQueryLocal(since int64) []HistoryPoint {
 	var out []HistoryPoint
 	for rows.Next() {
 		var pt HistoryPoint
-		var catJSON, scaledJSON, asnJSON, asnScaledJSON string
+		var catJSON, scaledJSON, asnJSON, asnScaledJSON, peerJSON, peerScaledJSON, streamJSON, streamScaledJSON, cdnJSON, cdnScaledJSON, roleJSON string
 		if rows.Scan(&pt.Ts, &pt.Mbps, &pt.MbpsScaled, &pt.SNMPIn, &pt.SNMPOut, &pt.SamplingFactor,
-			&catJSON, &scaledJSON, &asnJSON, &asnScaledJSON) == nil {
+			&catJSON, &scaledJSON, &pt.IPv4Mbps, &pt.IPv6Mbps,
+			&asnJSON, &asnScaledJSON, &peerJSON, &peerScaledJSON,
+			&streamJSON, &streamScaledJSON, &cdnJSON, &cdnScaledJSON, &roleJSON) == nil {
 			_ = json.Unmarshal([]byte(catJSON), &pt.ByCategory)
 			_ = json.Unmarshal([]byte(scaledJSON), &pt.ByCategoryScaled)
 			_ = json.Unmarshal([]byte(asnJSON), &pt.ByASN)
 			_ = json.Unmarshal([]byte(asnScaledJSON), &pt.ByASNScaled)
+			_ = json.Unmarshal([]byte(peerJSON), &pt.ByPeerASN)
+			_ = json.Unmarshal([]byte(peerScaledJSON), &pt.ByPeerASNScaled)
+			_ = json.Unmarshal([]byte(streamJSON), &pt.ByStreaming)
+			_ = json.Unmarshal([]byte(streamScaledJSON), &pt.ByStreamingScaled)
+			_ = json.Unmarshal([]byte(cdnJSON), &pt.ByCDN)
+			_ = json.Unmarshal([]byte(cdnScaledJSON), &pt.ByCDNScaled)
+			_ = json.Unmarshal([]byte(roleJSON), &pt.BySNMPRole)
 			out = append(out, pt)
 		}
 	}
 	return out
+}
+
+// storageQueryLocalLite — só séries de taxa (sem JSON pesado). Ideal p/ sparkline/dashboard.
+func storageQueryLocalLite(since int64) []HistoryPoint {
+	if historyDB == nil {
+		return nil
+	}
+	localCutoff := time.Now().Unix() - localRetentionSec()
+	if since < localCutoff {
+		since = localCutoff
+	}
+	q := `SELECT ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor,
+		COALESCE(ipv4_mbps, 0), COALESCE(ipv6_mbps, 0)
+		FROM history_raw WHERE ts >= ? ORDER BY ts`
+	rows, err := historyDB.Query(q, since)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []HistoryPoint
+	for rows.Next() {
+		var pt HistoryPoint
+		if rows.Scan(&pt.Ts, &pt.Mbps, &pt.MbpsScaled, &pt.SNMPIn, &pt.SNMPOut, &pt.SamplingFactor,
+			&pt.IPv4Mbps, &pt.IPv6Mbps) == nil {
+			out = append(out, pt)
+		}
+	}
+	return out
+}
+
+// queryHistoryLite — histórico leve (local only) para painéis de overview.
+func queryHistoryLite(since int64) []HistoryPoint {
+	out := storageQueryLocalLite(since)
+	if len(out) <= 1 {
+		return out
+	}
+	return downsampleHistory(out, 800)
 }
 
 // queryHistorySince — local (3d) + S3 (até 30d) conforme necessário.
@@ -245,7 +325,12 @@ func storageExportDayToS3(day string) error {
 	start := t.Unix()
 	end := start + 86400
 	rows, err := historyDB.Query(`SELECT ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor, by_category, by_category_scaled,
-		COALESCE(by_asn, '{}'), COALESCE(by_asn_scaled, '{}')
+		COALESCE(ipv4_mbps, 0), COALESCE(ipv6_mbps, 0),
+		COALESCE(by_asn, '{}'), COALESCE(by_asn_scaled, '{}'),
+		COALESCE(by_peer_asn, '{}'), COALESCE(by_peer_asn_scaled, '{}'),
+		COALESCE(by_streaming, '{}'), COALESCE(by_streaming_scaled, '{}'),
+		COALESCE(by_cdn, '{}'), COALESCE(by_cdn_scaled, '{}'),
+		COALESCE(by_snmp_role, '{}')
 		FROM history_raw WHERE ts >= ? AND ts < ? ORDER BY ts`, start, end)
 	if err != nil {
 		return err
@@ -254,13 +339,22 @@ func storageExportDayToS3(day string) error {
 	var pts []HistoryPoint
 	for rows.Next() {
 		var pt HistoryPoint
-		var catJSON, scaledJSON, asnJSON, asnScaledJSON string
+		var catJSON, scaledJSON, asnJSON, asnScaledJSON, peerJSON, peerScaledJSON, streamJSON, streamScaledJSON, cdnJSON, cdnScaledJSON, roleJSON string
 		if rows.Scan(&pt.Ts, &pt.Mbps, &pt.MbpsScaled, &pt.SNMPIn, &pt.SNMPOut, &pt.SamplingFactor,
-			&catJSON, &scaledJSON, &asnJSON, &asnScaledJSON) == nil {
+			&catJSON, &scaledJSON, &pt.IPv4Mbps, &pt.IPv6Mbps,
+			&asnJSON, &asnScaledJSON, &peerJSON, &peerScaledJSON,
+			&streamJSON, &streamScaledJSON, &cdnJSON, &cdnScaledJSON, &roleJSON) == nil {
 			_ = json.Unmarshal([]byte(catJSON), &pt.ByCategory)
 			_ = json.Unmarshal([]byte(scaledJSON), &pt.ByCategoryScaled)
 			_ = json.Unmarshal([]byte(asnJSON), &pt.ByASN)
 			_ = json.Unmarshal([]byte(asnScaledJSON), &pt.ByASNScaled)
+			_ = json.Unmarshal([]byte(peerJSON), &pt.ByPeerASN)
+			_ = json.Unmarshal([]byte(peerScaledJSON), &pt.ByPeerASNScaled)
+			_ = json.Unmarshal([]byte(streamJSON), &pt.ByStreaming)
+			_ = json.Unmarshal([]byte(streamScaledJSON), &pt.ByStreamingScaled)
+			_ = json.Unmarshal([]byte(cdnJSON), &pt.ByCDN)
+			_ = json.Unmarshal([]byte(cdnScaledJSON), &pt.ByCDNScaled)
+			_ = json.Unmarshal([]byte(roleJSON), &pt.BySNMPRole)
 			pts = append(pts, pt)
 		}
 	}

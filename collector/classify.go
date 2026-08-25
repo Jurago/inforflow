@@ -582,15 +582,14 @@ func isPrivateOrSpecial(ip net.IP) bool {
 	return false
 }
 
+// isAggregateLabel retorna true só para nomes de serviço (não IPs).
+// Incluir IPs públicos aqui fazia ByDestination/ByOrigin crescer sem limite
+// e inchava /api/stats (~13MB), travando o dashboard.
 func isAggregateLabel(name string) bool {
 	if name == "" || name == SourceIP {
 		return false
 	}
-	ip := net.ParseIP(name)
-	if ip == nil {
-		return true // named service
-	}
-	return !isPrivateOrSpecial(ip)
+	return net.ParseIP(name) == nil
 }
 
 func labelForEndpoint(ip net.IP, as uint32) (name string, cat FlowCategory, icon, asn string) {

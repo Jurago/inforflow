@@ -63,9 +63,106 @@ type snmpPrevCounters struct {
 }
 
 type SNMPStore struct {
-	mu    sync.RWMutex
-	snap  SNMPSnapshot
-	prev  map[int]snmpPrevCounters
+	mu      sync.RWMutex
+	snap    SNMPSnapshot
+	prev    map[int]snmpPrevCounters
+	ifaceH  []IfaceHistoryPoint // ring ~2h @ 5s ≈ 1440
+}
+
+type IfaceSample struct {
+	InMbps  float64 `json:"in_mbps"`
+	OutMbps float64 `json:"out_mbps"`
+}
+
+type IfaceHistoryPoint struct {
+	Ts      int64                  `json:"ts"`
+	ByIndex map[int]IfaceSample    `json:"by_index,omitempty"`
+	ByRole  map[string]float64     `json:"by_role,omitempty"`
+}
+
+func (s *SNMPStore) pushIfaceHistory(snap SNMPSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pt := IfaceHistoryPoint{
+		Ts:      time.Now().Unix(),
+		ByIndex: map[int]IfaceSample{},
+		ByRole:  map[string]float64{},
+	}
+	kept := 0
+	for _, iface := range snap.Interfaces {
+		if iface.OperStatus != 1 {
+			continue
+		}
+		total := iface.InMbps + iface.OutMbps
+		if iface.Role != "" {
+			pt.ByRole[iface.Role] += total
+		}
+		// guarda ifaces relevantes (role crítica ou >1 Mbps)
+		if iface.Role == "uplink" || iface.Role == "ix" || iface.Role == "cache" ||
+			iface.Role == "bras" || iface.Role == "cgnat" || total > 1 {
+			pt.ByIndex[iface.Index] = IfaceSample{InMbps: iface.InMbps, OutMbps: iface.OutMbps}
+			kept++
+			if kept >= 40 {
+				// continua roles, para índices
+			}
+		}
+	}
+	// limitar ByIndex a 40 maiores
+	if len(pt.ByIndex) > 40 {
+		type kv struct {
+			idx int
+			v   float64
+		}
+		arr := make([]kv, 0, len(pt.ByIndex))
+		for i, sm := range pt.ByIndex {
+			arr = append(arr, kv{i, sm.InMbps + sm.OutMbps})
+		}
+		sort.Slice(arr, func(a, b int) bool { return arr[a].v > arr[b].v })
+		keep := map[int]IfaceSample{}
+		for i := 0; i < 40 && i < len(arr); i++ {
+			keep[arr[i].idx] = pt.ByIndex[arr[i].idx]
+		}
+		pt.ByIndex = keep
+	}
+	s.ifaceH = append(s.ifaceH, pt)
+	const maxH = 1440 // ~2h @ 5s
+	if len(s.ifaceH) > maxH {
+		s.ifaceH = s.ifaceH[len(s.ifaceH)-maxH:]
+	}
+}
+
+func (s *SNMPStore) GetIfaceHistory(since int64, ifIndex int) []struct {
+	Ts      int64   `json:"ts"`
+	InMbps  float64 `json:"in_mbps"`
+	OutMbps float64 `json:"out_mbps"`
+} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]struct {
+		Ts      int64   `json:"ts"`
+		InMbps  float64 `json:"in_mbps"`
+		OutMbps float64 `json:"out_mbps"`
+	}, 0, len(s.ifaceH))
+	for _, p := range s.ifaceH {
+		if p.Ts < since {
+			continue
+		}
+		sm, ok := p.ByIndex[ifIndex]
+		if !ok {
+			out = append(out, struct {
+				Ts      int64   `json:"ts"`
+				InMbps  float64 `json:"in_mbps"`
+				OutMbps float64 `json:"out_mbps"`
+			}{Ts: p.Ts})
+			continue
+		}
+		out = append(out, struct {
+			Ts      int64   `json:"ts"`
+			InMbps  float64 `json:"in_mbps"`
+			OutMbps float64 `json:"out_mbps"`
+		}{Ts: p.Ts, InMbps: sm.InMbps, OutMbps: sm.OutMbps})
+	}
+	return out
 }
 
 var snmpStore = &SNMPStore{

@@ -13,10 +13,10 @@ Análise de tráfego ISP em tempo real: **NetFlow v9** + **SNMP** + **BGP** do r
 
 ## Páginas
 
-- `/` — Dashboard (NetFlow, SNMP, amostragem estimada, alertas)
-- `/graphs` — Séries temporais com filtro 1h/6h/24h + comparar períodos
-- `/router` — Interfaces SNMP
-- `/cdns` `/streaming` `/peers` `/asn` — Detalhes por categoria / ASN de destino
+- `/` — Dashboard (resumo: KPIs, gap, sparkline 1h, BGP, ifaces, talkers; links para detalhes)
+- `/graphs` — Séries temporais (1h–7d, IPv4/IPv6, ASN dest/peer, CDN/Streaming, zoom, export)
+- `/router` `/router/detail?ifindex=` — SNMP por role, histórico uplink, filtros, detalhe de iface
+- `/cdns` `/cdn/detail?name=Cloudflare` `/streaming` `/streaming/detail` `/peers` `/peers/detail` `/asn` `/asn/detail` — Detalhes por categoria / serviço / peer / ASN
 - `/flows` — Explorador com filtro por IP, categoria e ASN (`?asn=AS15169`)
 - `/sampling` `/cache` — Amostragem e cache
 
@@ -24,28 +24,47 @@ Análise de tráfego ISP em tempo real: **NetFlow v9** + **SNMP** + **BGP** do r
 
 | Rota | Descrição |
 |------|-----------|
-| `GET /api/stats` | Agregados + SNMP + BGP + sampling + alerts + `asn_breakdown` |
-| `GET /api/snmp` | Snapshot SNMP |
+| `GET /api/dashboard` | Snapshot slim do dashboard (KPIs, gap, blocks, sparkline, BGP top, flows) |
+| `GET /api/stats` | Agregados completos + SNMP + BGP + sampling + alerts + breakdowns |
+| `GET /api/asn` | Snapshot slim da página ASN (destinos, peers, daily, names) |
+| `GET /api/asn/daily` | Acumulado do dia por ASN de destino |
+| `GET /api/asn/detail?asn=AS15169&hours=6` | Detalhe de um ASN (live, histórico, flows) |
+| `GET /api/peers` | Snapshot Peers (BGP + Mbps scaled + downs + SNMP IX/transit + flows) |
+| `GET /api/peers/detail?asn=AS26162&hours=6` | Detalhe de um peer ASN |
+| `GET /api/cdn` | Snapshot CDN (rates+ASN, cache hit, % uplink, feeds, flows, overlap note) |
+| `GET /api/cdn/detail?name=Cloudflare&hours=6` | Detalhe de um CDN (live, histórico, SNMP match, flows) |
+| `GET /api/streaming` | Snapshot Streaming (rates, cache hit, % uplink, IPv4/IPv6, flows) |
+| `GET /api/streaming/detail?name=YouTube&hours=6` | Detalhe de um serviço (live, histórico, SNMP match, flows) |
+| `GET /api/router` | Snapshot roteador (SNMP + roles + alertas + NF por role; sem community) |
+| `GET /api/router/detail?ifindex=12&hours=1` | Detalhe de iface (série SNMP, flows in/out if) |
+| `GET /api/snmp` | Snapshot SNMP bruto |
 | `GET /api/bgp` | Sessões BGP |
-| `GET /api/flows?asn=&ip=&category=&q=` | Flows recentes (filtros) |
-| `GET /api/history?hours=24` | Histórico (inclui `by_asn_mbps_scaled`) |
+| `GET /api/flows?asn=&ip=&category=&q=` | Flows recentes (filtros; ring ~2000 + índice por ASN) |
+| `GET /api/history?hours=24&max_points=800&from=&to=` | Histórico (`by_*` + IPv4/IPv6 + `by_snmp_role_*`) |
 | `GET /api/history/compare?hours=24` | Compara período atual vs anterior |
 | `GET /api/alerts` | Alertas ativos (utilização, BGP, ASN alto, etc.) |
 | `GET /api/sampling` | Fator NetFlow×SNMP (nativo/auto/fixo) |
 | `GET /api/talkers` | Top clientes CGNAT `100.64.x` |
 | `GET /api/ipapi` | Status do resolvedor ASN (ip-api.com) |
-| `GET /api/export?kind=cdn\|streaming\|peers\|asn\|flows\|talkers&format=csv\|json` | Export |
+| `GET /api/export?kind=cdn\|streaming\|peers\|asn\|flows\|talkers\|router\|history&format=csv\|json` | Export |
 | `GET /api/health` | Saúde (sem auth) |
 
-Nomes de ASN: resolução automática via **ip-api.com** (gratuita, batch) com cache em `data/ipapi_asn.json`. Peers BGP locais (ex.: AS269096 N&K Tecnologia) entram no breakdown ASN mesmo quando o DstAS do flow é o destino final.
+Config relevante (`config.json`):
+- `alert_asn_ignore` — ASNs ignorados em alertas `asn_high_*` (Google/Meta/CF/…)
+- `asn_history_top` — top-N por amostra no histórico (padrão 30)
+- `asn_watched` — ASNs sempre mantidos no histórico
+- `cdn_watched` — CDNs sempre mantidos no histórico (padrão: Cloudflare, Akamai, Google Cache, AWS CloudFront, Fastly)
+- `asn_digest_hour` — hora local do digest diário via webhook/telegram (`-1` desliga)
+- `ix_asn` — ASN do IX usado no KPI da página Peers (padrão 26162 IX.br)
 
-Alertas externos (opcional em `config.json`):
-- `webhook_url` — POST JSON
-- `telegram_bot_token` + `telegram_chat_id`
-- `alert_util_pct` — limiar de uplink
-- `alert_asn_pct` / `alert_asn_mbps` — limiar por ASN de destino
+Página `/asn/detail?asn=AS…` — série, peer e flows indexados por ASN.
+Página `/peers/detail?asn=AS…` — sessões BGP, histórico e flows do peer.
 
-Auth: defina `INFORFLOW_API_TOKEN`, `INFORFLOW_UI_USER` e `INFORFLOW_UI_PASSWORD` em `/etc/inforflow/secrets.env`. Login em `/login` gera **token de sessão** (24h). API usa header `X-API-Token`.
+Nomes de ASN: resolução via **ip-api.com** (cache em `data/ipapi_asn.json`). Destino e peer BGP ficam em listas separadas.
+
+Alertas externos (opcional em `config.json`): `webhook_url`, `telegram_bot_token` + `telegram_chat_id`, `alert_util_pct`, `alert_asn_pct` / `alert_asn_mbps`.
+
+Auth: `INFORFLOW_API_TOKEN`, `INFORFLOW_UI_USER` e `INFORFLOW_UI_PASSWORD` em `/etc/inforflow/secrets.env`. Login em `/login` gera token de sessão (24h). API usa header `X-API-Token`.
 
 ## Deploy (produção)
 

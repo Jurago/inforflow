@@ -10,4 +10,5 @@ fi
 set -a
 [ -f /etc/inforflow/secrets.env ] && . /etc/inforflow/secrets.env
 set +a
+"$VENV/bin/pip" install -q uptime-kuma-api python-socketio 2>/dev/null || true
 exec "$VENV/bin/python3" "$DIR/setup-uptimekuma.py" "$@"
