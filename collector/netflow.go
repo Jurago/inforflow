@@ -5,13 +5,24 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var (
 	NetFlowPort = ":2055"
 	UDPBufSize  = 65535
+
+	netflowPktsTotal   uint64
+	netflowFlowsTotal  uint64
+	netflowUDPRcvBuf   int64
+	netflowUDPQueue    int64 // bytes pending in kernel recv queue (approx)
+	netflowKernelDrops uint64
+	netflowConn        *net.UDPConn
 )
 
 // NetFlow v9 / IPFIX field type IDs (common subset)
@@ -129,6 +140,87 @@ type RawFlow struct {
 	OutIf   uint32
 }
 
+func NetFlowStats() map[string]interface{} {
+	return map[string]interface{}{
+		"packets_total":  atomic.LoadUint64(&netflowPktsTotal),
+		"flows_decoded":  atomic.LoadUint64(&netflowFlowsTotal),
+		"udp_rcvbuf":     atomic.LoadInt64(&netflowUDPRcvBuf),
+		"udp_queue":      atomic.LoadInt64(&netflowUDPQueue),
+		"kernel_drops":   atomic.LoadUint64(&netflowKernelDrops),
+		"silent_s":       netFlowSilentSec(),
+	}
+}
+
+func udpRcvBufBytes() int {
+	mb := GetConfig().UDPRcvBufMB
+	if mb <= 0 {
+		mb = 32
+	}
+	if mb > 256 {
+		mb = 256
+	}
+	return mb * 1024 * 1024
+}
+
+// pollUDPKernelStats lê fila/drops aproximados via /proc/net/udp e /proc/net/snmp.
+func pollUDPKernelStats() {
+	port := NetFlowPort
+	if strings.HasPrefix(port, ":") {
+		port = port[1:]
+	}
+	pnum, err := strconv.Atoi(port)
+	if err != nil || pnum <= 0 {
+		return
+	}
+	want := strings.ToUpper(fmt.Sprintf("%04X", pnum))
+
+	if b, err := os.ReadFile("/proc/net/udp"); err == nil {
+		lines := strings.Split(string(b), "\n")
+		for _, line := range lines[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 5 {
+				continue
+			}
+			// local_address is ip:port hex
+			parts := strings.Split(fields[1], ":")
+			if len(parts) != 2 || !strings.EqualFold(parts[1], want) {
+				continue
+			}
+			// tx:rx queue hex
+			qr := strings.Split(fields[4], ":")
+			if len(qr) == 2 {
+				if rx, e := strconv.ParseInt(qr[1], 16, 64); e == nil {
+					atomic.StoreInt64(&netflowUDPQueue, rx)
+				}
+			}
+			break
+		}
+	}
+
+	if b, err := os.ReadFile("/proc/net/snmp"); err == nil {
+		lines := strings.Split(string(b), "\n")
+		for i := 0; i+1 < len(lines); i++ {
+			if !strings.HasPrefix(lines[i], "Udp:") || !strings.HasPrefix(lines[i+1], "Udp:") {
+				continue
+			}
+			hdr := strings.Fields(lines[i])
+			val := strings.Fields(lines[i+1])
+			if len(hdr) != len(val) {
+				break
+			}
+			for j, h := range hdr {
+				if h == "RcvbufErrors" {
+					if n, e := strconv.ParseUint(val[j], 10, 64); e == nil {
+						atomic.StoreUint64(&netflowKernelDrops, n)
+					}
+					break
+				}
+			}
+			break
+		}
+	}
+}
+
 func StartNetFlowListener(handler func(RawFlow)) {
 	addr, err := net.ResolveUDPAddr("udp", NetFlowPort)
 	if err != nil {
@@ -138,29 +230,53 @@ func StartNetFlowListener(handler func(RawFlow)) {
 	if err != nil {
 		log.Fatalf("listen UDP %s: %v", NetFlowPort, err)
 	}
-	if err := conn.SetReadBuffer(8 * 1024 * 1024); err != nil {
-		log.Printf("aviso: buffer UDP: %v", err)
+	netflowConn = conn
+	wantBuf := udpRcvBufBytes()
+	if err := conn.SetReadBuffer(wantBuf); err != nil {
+		log.Printf("aviso: buffer UDP %d: %v", wantBuf, err)
+	}
+	atomic.StoreInt64(&netflowUDPRcvBuf, int64(wantBuf))
+	if f, err := conn.File(); err == nil {
+		// Report effective SO_RCVBUF (kernel often doubles the request)
+		var actual int
+		if n, err := syscallGetSockOptRcvBuf(int(f.Fd())); err == nil {
+			actual = n
+			atomic.StoreInt64(&netflowUDPRcvBuf, int64(actual))
+		}
+		_ = f.Close()
+		if actual > 0 {
+			log.Printf("NetFlow SO_RCVBUF efetivo=%d (pedido=%d)", actual, wantBuf)
+		}
 	}
 
 	cache := NewTemplateCache()
 	log.Printf("NetFlow listener ativo em UDP %s (aguardando %s)", NetFlowPort, SourceIP)
 
-	buf := make([]byte, UDPBufSize)
-	var pktCount, flowCount uint64
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		for range ticker.C {
+			pollUDPKernelStats()
+		}
+	}()
 
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		for range ticker.C {
-			log.Printf("NetFlow: %d pacotes recebidos, %d flows decodificados", pktCount, flowCount)
+			log.Printf("NetFlow: %d pacotes recebidos, %d flows decodificados, fila_udp=%d drops=%d",
+				atomic.LoadUint64(&netflowPktsTotal),
+				atomic.LoadUint64(&netflowFlowsTotal),
+				atomic.LoadInt64(&netflowUDPQueue),
+				atomic.LoadUint64(&netflowKernelDrops))
 		}
 	}()
 
+	buf := make([]byte, UDPBufSize)
 	for {
 		n, remote, err := conn.ReadFromUDP(buf)
 		if n == 0 || err != nil {
 			continue
 		}
-		pktCount++
+		atomic.AddUint64(&netflowPktsTotal, 1)
 		exporter := remote.IP.String()
 		if !exporterAllowed(exporter) {
 			continue
@@ -168,7 +284,7 @@ func StartNetFlowListener(handler func(RawFlow)) {
 		markNetFlowReceived()
 		flows := parsePacket(buf[:n], cache, exporter)
 		for _, f := range flows {
-			flowCount++
+			atomic.AddUint64(&netflowFlowsTotal, 1)
 			handler(f)
 		}
 	}

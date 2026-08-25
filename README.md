@@ -66,6 +66,14 @@ Alertas externos (opcional em `config.json`): `webhook_url`, `telegram_bot_token
 
 Auth: `INFORFLOW_API_TOKEN`, `INFORFLOW_UI_USER` e `INFORFLOW_UI_PASSWORD` em `/etc/inforflow/secrets.env`. Login em `/login` gera token de sessão (24h). API usa header `X-API-Token`.
 
+Operação:
+- Buffer UDP NetFlow: `udp_rcvbuf_mb` (config) + `/etc/sysctl.d/99-inforflow-udp.conf`
+- Ingest paralelo: `ingest_workers` (0 = auto até 8)
+- Health expõe `udp_queue`, `gap_pct`, `ingest_*`, `s3`, `netflow`
+- Alertas: `alert_gap_pct`, `alert_silent_sec`, `alert_udp_queue` (+ fila UDP / gap NF×SNMP)
+- Backup local diário: `inforflow-backup.timer` → `data/backups/local/`
+- `./start.sh` valida assets JS/CSS antes de reiniciar serviços
+
 ## Deploy (produção)
 
 ```bash

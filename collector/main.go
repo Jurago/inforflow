@@ -1891,27 +1891,37 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	samp := sampling.Get()
 	silent := netFlowSilentSec()
 	pts, dbBytes := storageLocalStats()
+	snmpAvg := (snmp.UplinkInMbps + snmp.UplinkOutMbps) / 2
+	nf := NetFlowStats()
 	writeJSON(w, map[string]interface{}{
-		"status":       "ok",
-		"source_ip":    SourceIP,
-		"service":      "inforflow-collector",
-		"mode":         "netflow+snmp+bgp",
-		"listen":       NetFlowPort,
-		"snmp":         snmp.OK,
-		"bgp":          bgp.OK,
-		"bgp_peers":    bgp.Established,
-		"bgp_total":    bgp.Total,
-		"sys_name":     snmp.SysName,
-		"uptime_s":     int(time.Since(store.started).Seconds()),
-		"flows":        atomic.LoadUint64(&store.seq),
-		"sampling":     samp.Effective,
-		"sampling_mode": samp.Mode,
-		"mbps_scaled":  samp.ScaledMbps,
-		"snmp_mbps":    (snmp.UplinkInMbps + snmp.UplinkOutMbps) / 2,
+		"status":           "ok",
+		"source_ip":        SourceIP,
+		"service":          "inforflow-collector",
+		"mode":             "netflow+snmp+bgp",
+		"listen":           NetFlowPort,
+		"snmp":             snmp.OK,
+		"bgp":              bgp.OK,
+		"bgp_peers":        bgp.Established,
+		"bgp_total":        bgp.Total,
+		"sys_name":         snmp.SysName,
+		"uptime_s":         int(time.Since(store.started).Seconds()),
+		"flows":            atomic.LoadUint64(&store.seq),
+		"sampling":         samp.Effective,
+		"sampling_mode":    samp.Mode,
+		"mbps_scaled":      samp.ScaledMbps,
+		"snmp_mbps":        snmpAvg,
+		"gap_pct":          gapPct(samp.ScaledMbps, snmpAvg),
 		"netflow_silent_s": silent,
-		"alerts":       len(alerts.Active()),
-		"auth_enabled": GetConfig().APIToken != "" || uiAuthEnabled(),
-		"ipapi":        ipapi.Stats(),
+		"netflow":          nf,
+		"udp_queue":        nf["udp_queue"],
+		"udp_rcvbuf":       nf["udp_rcvbuf"],
+		"udp_kernel_drops": nf["kernel_drops"],
+		"ingest_queue":     ingestQueueLen(),
+		"ingest_workers":   ingestWorkerCount(),
+		"alerts":           len(alerts.Active()),
+		"auth_enabled":     GetConfig().APIToken != "" || uiAuthEnabled(),
+		"ipapi":            ipapi.Stats(),
+		"s3":               S3Status(),
 		"storage": map[string]interface{}{
 			"history_points": pts,
 			"db_bytes":       dbBytes,
@@ -1966,7 +1976,7 @@ func main() {
 			time.Sleep(time.Hour)
 		}
 	}()
-	go StartNetFlowListener(ingestRaw)
+	startIngestPipeline()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", handleHealth)

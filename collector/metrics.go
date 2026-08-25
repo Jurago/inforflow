@@ -40,6 +40,22 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "inforflow_alerts_active %d\n", len(alerts.Active()))
 	fmt.Fprintf(w, "inforflow_netflow_silent_seconds %d\n", netFlowSilentSec())
 	fmt.Fprintf(w, "inforflow_s3_enabled %d\n", boolMetric(s3Enabled()))
+	fmt.Fprintf(w, "inforflow_netflow_packets_total %d\n", atomic.LoadUint64(&netflowPktsTotal))
+	fmt.Fprintf(w, "inforflow_netflow_flows_decoded_total %d\n", atomic.LoadUint64(&netflowFlowsTotal))
+	fmt.Fprintf(w, "inforflow_udp_rcvbuf_bytes %d\n", atomic.LoadInt64(&netflowUDPRcvBuf))
+	fmt.Fprintf(w, "inforflow_udp_queue_bytes %d\n", atomic.LoadInt64(&netflowUDPQueue))
+	fmt.Fprintf(w, "inforflow_udp_kernel_drops %d\n", atomic.LoadUint64(&netflowKernelDrops))
+	fmt.Fprintf(w, "inforflow_ingest_queue %d\n", ingestQueueLen())
+	fmt.Fprintf(w, "inforflow_ingest_workers %d\n", ingestWorkerCount())
+	snmpAvg := (snmp.UplinkInMbps + snmp.UplinkOutMbps) / 2
+	fmt.Fprintf(w, "inforflow_gap_pct %.2f\n", gapPct(samp.ScaledMbps, snmpAvg))
+	s3s := S3Status()
+	if v, ok := s3s["last_ok_at"].(int64); ok && v > 0 {
+		fmt.Fprintf(w, "inforflow_s3_last_ok_timestamp %d\n", v)
+	}
+	if v, ok := s3s["err_count"].(uint64); ok {
+		fmt.Fprintf(w, "inforflow_s3_errors_total %d\n", v)
+	}
 	pts, dbBytes := storageLocalStats()
 	fmt.Fprintf(w, "inforflow_history_points %d\n", pts)
 	fmt.Fprintf(w, "inforflow_db_bytes %d\n", dbBytes)

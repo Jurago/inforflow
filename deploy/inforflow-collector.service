@@ -13,6 +13,8 @@ RestartSec=5
 StartLimitIntervalSec=300
 StartLimitBurst=10
 LimitNOFILE=65535
+# Permite SO_RCVBUF grande no NetFlow
+LimitMEMLOCK=infinity
 StandardOutput=journal
 StandardError=journal
 

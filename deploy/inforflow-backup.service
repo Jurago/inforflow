@@ -1,0 +1,9 @@
+[Unit]
+Description=Inforflow local config/ASN backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/var/www/html/inforflow
+EnvironmentFile=-/etc/inforflow/secrets.env
+ExecStart=/var/www/html/inforflow/scripts/backup-local.sh

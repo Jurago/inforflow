@@ -3,6 +3,15 @@
     const passInput = document.getElementById('login-pass');
     const btn = document.getElementById('login-btn');
     const err = document.getElementById('login-error');
+    const banner = document.getElementById('login-banner');
+
+    const params = new URLSearchParams(window.location.search);
+    if (banner && (params.get('need') || params.get('expired'))) {
+        banner.hidden = false;
+        if (params.get('expired')) {
+            banner.textContent = 'Sessão expirada ou inválida. Entre novamente para ver os dados — a coleta não parou.';
+        }
+    }
 
     async function checkAlreadyLoggedIn() {
         const token = localStorage.getItem('inforflow_api_token');

@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -16,6 +17,68 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 )
+
+type s3SyncStatus struct {
+	mu           sync.RWMutex
+	Enabled      bool   `json:"enabled"`
+	LastOKAt     int64  `json:"last_ok_at,omitempty"`
+	LastErrorAt  int64  `json:"last_error_at,omitempty"`
+	LastError    string `json:"last_error,omitempty"`
+	LastJob      string `json:"last_job,omitempty"`
+	OKCount      uint64 `json:"ok_count"`
+	ErrCount     uint64 `json:"err_count"`
+}
+
+var s3Status = &s3SyncStatus{}
+
+func s3MarkOK(job string) {
+	s3Status.mu.Lock()
+	defer s3Status.mu.Unlock()
+	s3Status.Enabled = true
+	s3Status.LastOKAt = time.Now().Unix()
+	s3Status.LastJob = job
+	s3Status.OKCount++
+	s3Status.LastError = ""
+}
+
+func s3MarkErr(job string, err error) {
+	if err == nil {
+		return
+	}
+	s3Status.mu.Lock()
+	defer s3Status.mu.Unlock()
+	s3Status.Enabled = true
+	s3Status.LastErrorAt = time.Now().Unix()
+	s3Status.LastJob = job
+	s3Status.LastError = err.Error()
+	s3Status.ErrCount++
+	log.Printf("s3: %s falhou: %v", job, err)
+}
+
+func S3Status() map[string]interface{} {
+	s3Status.mu.RLock()
+	defer s3Status.mu.RUnlock()
+	enabled := s3Enabled()
+	out := map[string]interface{}{
+		"enabled": enabled,
+		"bucket":  GetConfig().S3Bucket,
+	}
+	if !enabled {
+		return out
+	}
+	out["last_ok_at"] = s3Status.LastOKAt
+	out["last_error_at"] = s3Status.LastErrorAt
+	out["last_job"] = s3Status.LastJob
+	out["ok_count"] = s3Status.OKCount
+	out["err_count"] = s3Status.ErrCount
+	if s3Status.LastError != "" {
+		out["last_error"] = s3Status.LastError
+	}
+	if s3Status.LastOKAt > 0 {
+		out["age_s"] = time.Now().Unix() - s3Status.LastOKAt
+	}
+	return out
+}
 
 func s3Enabled() bool {
 	c := GetConfig()
@@ -136,7 +199,11 @@ func s3SyncHistoryExport() {
 		return
 	}
 	yesterday := time.Now().Add(-24 * time.Hour).Format("2006-01-02")
-	_ = storageExportDayToS3(yesterday)
+	if err := storageExportDayToS3(yesterday); err != nil {
+		s3MarkErr("history_export", err)
+	} else {
+		s3MarkOK("history_export")
+	}
 }
 
 func s3SyncDBBackup() {
@@ -150,8 +217,9 @@ func s3SyncDBBackup() {
 	ts := time.Now().Format("2006-01-02-15")
 	key := fmt.Sprintf("backups/history-%s.db", ts)
 	if err := s3UploadFile(dbPath, key); err != nil {
-		log.Printf("s3 backup db: %v", err)
+		s3MarkErr("db_backup", err)
 	} else {
+		s3MarkOK("db_backup")
 		log.Printf("s3: backup %s", key)
 	}
 }
@@ -167,10 +235,17 @@ func s3SyncFlowsSnapshot() {
 	b, _ := json.Marshal(flows)
 	ts := time.Now().Format("2006-01-02-15")
 	key := fmt.Sprintf("flows/snapshot-%s.json", ts)
-	_ = s3UploadBytes(b, key, "application/json")
+	if err := s3UploadBytes(b, key, "application/json"); err != nil {
+		s3MarkErr("flows_snapshot", err)
+	} else {
+		s3MarkOK("flows_snapshot")
+	}
 }
 
 func StartS3Sync() {
+	s3Status.mu.Lock()
+	s3Status.Enabled = s3Enabled()
+	s3Status.mu.Unlock()
 	if !s3Enabled() {
 		log.Printf("s3: desabilitado (defina INFORFLOW_S3_* no ambiente)")
 		return

@@ -26,6 +26,11 @@ type AppConfig struct {
 	AlertASNPct    float64 `json:"alert_asn_pct"`   // % do uplink SNMP por ASN (0=desliga)
 	AlertASNMbps   float64 `json:"alert_asn_mbps"`  // Mbps absoluto por ASN (0=só %)
 	AlertASNIgnore []string `json:"alert_asn_ignore"` // ASNs ignorados em asn_high_* (ex.: AS15169)
+	AlertGapPct    float64  `json:"alert_gap_pct"`    // |NF×fator − SNMP| / SNMP % (0=desliga; padrão 35)
+	AlertSilentSec int      `json:"alert_silent_sec"`  // NetFlow silencioso (padrão 90)
+	AlertUDPQueue  int64    `json:"alert_udp_queue"`   // bytes na fila UDP kernel (padrão 8MB)
+	UDPRcvBufMB    int      `json:"udp_rcvbuf_mb"`     // SO_RCVBUF pedido (padrão 32)
+	IngestWorkers  int      `json:"ingest_workers"`    // workers de classificação (0=auto)
 	ASNHistoryTop  int      `json:"asn_history_top"`  // top-N por amostra no histórico (padrão 30)
 	ASNWatched     []string `json:"asn_watched"`      // ASNs sempre mantidos no histórico
 	CDNWatched     []string `json:"cdn_watched"`      // CDNs sempre mantidos no histórico
@@ -71,6 +76,11 @@ var (
 			"AS2906",  // Netflix
 			"AS20940", // Akamai
 		},
+		AlertGapPct:    35,
+		AlertSilentSec: 90,
+		AlertUDPQueue:  8 * 1024 * 1024,
+		UDPRcvBufMB:    32,
+		IngestWorkers:  0,
 		ASNHistoryTop: 30,
 		ASNWatched:    nil,
 		CDNWatched:    []string{"Cloudflare", "Akamai", "Google Cache", "AWS CloudFront", "Fastly"},
@@ -210,6 +220,18 @@ func LoadConfig(path string) {
 	}
 	if cfg.IXASN == 0 {
 		cfg.IXASN = 26162
+	}
+	if cfg.AlertGapPct < 0 {
+		cfg.AlertGapPct = 0
+	}
+	if cfg.AlertSilentSec <= 0 {
+		cfg.AlertSilentSec = 90
+	}
+	if cfg.AlertUDPQueue <= 0 {
+		cfg.AlertUDPQueue = 8 * 1024 * 1024
+	}
+	if cfg.UDPRcvBufMB <= 0 {
+		cfg.UDPRcvBufMB = 32
 	}
 	_ = os.MkdirAll(cfg.DataDir, 0755)
 

@@ -103,14 +103,15 @@ func handleStorage(w http.ResponseWriter, r *http.Request) {
 	keys, _ := s3ListBackups("history/daily/")
 	localPts, localSize := storageLocalStats()
 	writeJSON(w, map[string]interface{}{
-		"sqlite_path":      storageDBPath(),
-		"s3_enabled":       s3Enabled(),
-		"s3_bucket":        GetConfig().S3Bucket,
-		"local_hours":      GetConfig().HistoryLocalH,
-		"s3_days":          GetConfig().HistoryS3Days,
-		"local_points":     localPts,
-		"local_db_bytes":   localSize,
+		"sqlite_path":       storageDBPath(),
+		"s3_enabled":        s3Enabled(),
+		"s3_bucket":         GetConfig().S3Bucket,
+		"s3_status":         S3Status(),
+		"local_hours":       GetConfig().HistoryLocalH,
+		"s3_days":           GetConfig().HistoryS3Days,
+		"local_points":      localPts,
+		"local_db_bytes":    localSize,
 		"s3_daily_archives": keys,
-		"s3_backups":       func() []string { k, _ := s3ListBackups("backups/"); return k }(),
+		"s3_backups":        func() []string { k, _ := s3ListBackups("backups/"); return k }(),
 	})
 }

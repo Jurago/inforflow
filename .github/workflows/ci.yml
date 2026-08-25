@@ -25,4 +25,13 @@ jobs:
         working-directory: server
         run: cargo build --release
       - name: Smoke script
-        run: bash scripts/healthcheck.sh || true
+        run: bash -n scripts/healthcheck.sh && bash -n scripts/backup-local.sh && bash -n start.sh
+      - name: Verify UI assets referenced by layout
+        run: |
+          set -e
+          test -s static/js/inforflow.js
+          test -s static/js/dashboard.js
+          test -s static/js/auth.js
+          while read -r js; do
+            test -s "static/js/$js"
+          done < <(grep -oE 'static/js/[a-z0-9_]+\.js' server/src/pages/layout.rs | sed 's|static/js/||' | sort -u)

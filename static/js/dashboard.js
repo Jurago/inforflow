@@ -67,6 +67,30 @@
         </div>`;
     }
 
+    function renderOpsShortcuts(data) {
+        const el = document.getElementById('ops-shortcuts');
+        if (!el) return;
+        const bgp = data.bgp || {};
+        const snmp = data.snmp || {};
+        const down = (bgp.top_down || []).length || bgp.down || 0;
+        const critical = (snmp.critical || []).filter(i =>
+            Math.max(i.in_util_pct || 0, i.out_util_pct || 0) >= 70
+        ).length;
+        const talkers = (data.top_talkers || []).length;
+        const alertsN = (data.alerts || []).length;
+        const gap = data.gap_pct || 0;
+        const chips = [
+            { href: '/peers?state=down', label: `BGP down · ${down}`, hot: down > 0 },
+            { href: '/router', label: `Ifaces críticas · ${critical}`, hot: critical > 0 },
+            { href: '/flows', label: `Talkers CGNAT · ${talkers}`, hot: false },
+            { href: '/#alerts-list', label: `Alertas · ${alertsN}`, hot: alertsN > 0 },
+            { href: '/sampling', label: `Gap NF×SNMP · ${gap.toFixed(0)}%`, hot: gap >= 35 }
+        ];
+        el.innerHTML = chips.map(c =>
+            `<a class="ops-chip${c.hot ? ' ops-chip-hot' : ''}" href="${c.href}">${c.label}</a>`
+        ).join('');
+    }
+
     function renderBlocks(blocks) {
         const el = document.getElementById('dash-blocks');
         if (!el) return;
@@ -201,7 +225,11 @@
         updating = true;
         try {
             const data = await fetchDash();
-            if (!data) return;
+            if (!data) {
+                const st = document.getElementById('dash-status');
+                if (st) st.innerHTML = '<div class="alert-item alert-warning">Aguardando dados do coletor… Verifique login e /api/health.</div>';
+                return;
+            }
 
             if (updateSamplingChip) updateSamplingChip(data.sampling);
             if (updateSourceIP) updateSourceIP(data.exporter || data.source);
@@ -222,6 +250,7 @@
             if (renderAlerts) renderAlerts(data.alerts || [], 'alerts-list');
             updateAlertBadge((data.alerts || []).length);
             renderStatus(data);
+            renderOpsShortcuts(data);
             renderBlocks(data.block_shares);
 
             const snmp = data.snmp || {};

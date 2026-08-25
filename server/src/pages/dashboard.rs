@@ -25,6 +25,7 @@ pub fn content() -> String {
 
     <div id="alerts-list" class="alerts-strip fade-in-up"></div>
     <div id="dash-status" class="alerts-strip fade-in-up" style="animation-delay:0.03s"></div>
+    <section class="ops-shortcuts fade-in-up" id="ops-shortcuts" style="animation-delay:0.04s" aria-label="Atalhos operacionais"></section>
 
     <section class="stats-grid fade-in-up" style="animation-delay: 0.05s">
         <div class="stat-card stat-card-highlight">

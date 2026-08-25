@@ -14,9 +14,19 @@ impl Layout {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title} — Inforflow</title>
-    <link rel="stylesheet" href="/static/css/inforflow.css?v=20260811b">
+    <link rel="stylesheet" href="/static/css/inforflow.css?v=20260825a">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+    (function () {{
+      if (location.pathname === '/login') return;
+      try {{
+        if (!localStorage.getItem('inforflow_api_token')) {{
+          location.replace('/login?need=1');
+        }}
+      }} catch (e) {{}}
+    }})();
+    </script>
 </head>
 <body>
     <div class="app-shell">
@@ -105,8 +115,8 @@ impl Layout {
         </main>
     </div>
     <div id="flow-particles" class="flow-particles"></div>
-    <script src="/static/js/inforflow.js?v=20260811b"></script>
-    <script src="/static/js/{page_script}?v=20260811b"></script>
+    <script src="/static/js/inforflow.js?v=20260825a"></script>
+    <script src="/static/js/{page_script}?v=20260825a"></script>
 </body>
 </html>"##,
             title = meta.title,
