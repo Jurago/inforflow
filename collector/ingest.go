@@ -8,21 +8,26 @@ import (
 
 var (
 	ingestCh      chan RawFlow
+	storeCh       chan FlowRecord
 	ingestWorkers int32
 )
 
 func ingestQueueLen() int {
-	if ingestCh == nil {
-		return 0
+	n := 0
+	if ingestCh != nil {
+		n += len(ingestCh)
 	}
-	return len(ingestCh)
+	if storeCh != nil {
+		n += len(storeCh)
+	}
+	return n
 }
 
 func ingestWorkerCount() int {
 	return int(atomic.LoadInt32(&ingestWorkers))
 }
 
-// startIngestPipeline separa decode UDP (listener) da classificação/agregação (workers).
+// startIngestPipeline: decode UDP → classify (N workers) → single AddFlow writer.
 func startIngestPipeline() {
 	n := GetConfig().IngestWorkers
 	if n <= 0 {
@@ -35,15 +40,25 @@ func startIngestPipeline() {
 		}
 	}
 	ingestCh = make(chan RawFlow, 131072)
+	storeCh = make(chan FlowRecord, 65536)
 	atomic.StoreInt32(&ingestWorkers, int32(n))
+
 	for i := 0; i < n; i++ {
 		go func() {
-			for f := range ingestCh {
-				ingestRaw(f)
+			for raw := range ingestCh {
+				if f, ok := classifyRaw(raw); ok {
+					storeCh <- f
+				}
 			}
 		}()
 	}
-	log.Printf("ingest: %d workers · fila %d", n, cap(ingestCh))
+	go func() {
+		for f := range storeCh {
+			store.AddFlow(f)
+		}
+	}()
+
+	log.Printf("ingest: %d classify workers · rawQ %d · storeQ %d · single writer", n, cap(ingestCh), cap(storeCh))
 	go StartNetFlowListener(func(f RawFlow) {
 		ingestCh <- f
 	})

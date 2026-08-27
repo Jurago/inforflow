@@ -14,7 +14,7 @@ var (
 	SNMPHost      = "170.245.127.191"
 	SNMPPort      = 15161
 	SNMPCommunity = "infornetV2"
-	SNMPInterval  = 5 * time.Second
+	SNMPInterval  = 10 * time.Second
 )
 
 type SNMPInterface struct {
@@ -62,11 +62,19 @@ type snmpPrevCounters struct {
 	at      time.Time
 }
 
+// IfaceMetaLite — lookup O(1) no hot path NetFlow (sem copiar slices).
+type IfaceMetaLite struct {
+	Name  string
+	Alias string
+	Role  string
+}
+
 type SNMPStore struct {
 	mu      sync.RWMutex
 	snap    SNMPSnapshot
 	prev    map[int]snmpPrevCounters
 	ifaceH  []IfaceHistoryPoint // ring ~2h @ 5s ≈ 1440
+	byIndex map[uint32]IfaceMetaLite
 }
 
 type IfaceSample struct {
@@ -166,8 +174,28 @@ func (s *SNMPStore) GetIfaceHistory(since int64, ifIndex int) []struct {
 }
 
 var snmpStore = &SNMPStore{
-	prev: make(map[int]snmpPrevCounters),
-	snap: SNMPSnapshot{Host: SNMPHost, Port: SNMPPort},
+	prev:    make(map[int]snmpPrevCounters),
+	byIndex: make(map[uint32]IfaceMetaLite),
+	snap:    SNMPSnapshot{Host: SNMPHost, Port: SNMPPort},
+}
+
+func (s *SNMPStore) rebuildIndexLocked() {
+	m := make(map[uint32]IfaceMetaLite, len(s.snap.Interfaces))
+	for _, iface := range s.snap.Interfaces {
+		m[uint32(iface.Index)] = IfaceMetaLite{
+			Name:  iface.Name,
+			Alias: iface.Alias,
+			Role:  iface.Role,
+		}
+	}
+	s.byIndex = m
+}
+
+func (s *SNMPStore) setSnap(snap SNMPSnapshot) {
+	s.mu.Lock()
+	s.snap = snap
+	s.rebuildIndexLocked()
+	s.mu.Unlock()
 }
 
 func (s *SNMPStore) Get() SNMPSnapshot {
@@ -178,6 +206,47 @@ func (s *SNMPStore) Get() SNMPSnapshot {
 	out.TopIn = append([]SNMPInterface(nil), s.snap.TopIn...)
 	out.TopOut = append([]SNMPInterface(nil), s.snap.TopOut...)
 	return out
+}
+
+// LookupIface — O(1), sem cópia de slices (hot path).
+func (s *SNMPStore) LookupIface(idx uint32) (name, role string, ok bool) {
+	if idx == 0 {
+		return "", "", false
+	}
+	s.mu.RLock()
+	meta, ok := s.byIndex[idx]
+	s.mu.RUnlock()
+	if !ok {
+		return "", "", false
+	}
+	n := meta.Alias
+	if n == "" {
+		n = meta.Name
+	}
+	return n, meta.Role, true
+}
+
+// LookupCacheIface — verifica se in/out ifIndex é role cache.
+func (s *SNMPStore) LookupCacheIface(inIf, outIf uint32) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	check := func(idx uint32) string {
+		if idx == 0 {
+			return ""
+		}
+		meta, ok := s.byIndex[idx]
+		if !ok || meta.Role != "cache" {
+			return ""
+		}
+		if meta.Alias != "" {
+			return meta.Alias
+		}
+		return meta.Name
+	}
+	if n := check(inIf); n != "" {
+		return n
+	}
+	return check(outIf)
 }
 
 // --- minimal SNMPv2c ---
@@ -406,22 +475,24 @@ func snmpRequest(pduType byte, oid string, reqID int) (string, interface{}, erro
 	pdu := berSeq(pduType, berInt(reqID), berInt(0), berInt(0), berSeq(0x30, varbind))
 	msg := berSeq(0x30, berInt(1), berOctet(SNMPCommunity), pdu)
 
-	addr := &net.UDPAddr{IP: net.ParseIP(SNMPHost), Port: SNMPPort}
-	conn, err := net.DialUDP("udp", nil, addr)
+	snmpUDPMu.Lock()
+	defer snmpUDPMu.Unlock()
+
+	conn, err := snmpConnLocked()
 	if err != nil {
 		return "", nil, err
 	}
-	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	if _, err := conn.Write(msg); err != nil {
+		snmpCloseConnLocked()
 		return "", nil, err
 	}
 
 	buf := make([]byte, 65535)
-	// Accept matching request-id; ignore stale UDP replies
 	for attempt := 0; attempt < 5; attempt++ {
 		n, err := conn.Read(buf)
 		if err != nil {
+			snmpCloseConnLocked()
 			return "", nil, err
 		}
 		data := buf[:n]
@@ -444,17 +515,15 @@ func snmpRequest(pduType byte, oid string, reqID int) (string, interface{}, erro
 			if err != nil || tReq != 0x02 {
 				break
 			}
-			gotID := int(asUint64(decodeSNMPValue(0x02, vReq)))
-			// signed int decode via asUint64 path — re-decode properly
-			gotID = berIntValue(vReq)
+			gotID := berIntValue(vReq)
 			if gotID != reqID {
-				continue // stale
+				continue
 			}
-			_, _, k, err = parseBER(val, k) // error-status
+			_, _, k, err = parseBER(val, k)
 			if err != nil {
 				break
 			}
-			_, _, k, err = parseBER(val, k) // error-index
+			_, _, k, err = parseBER(val, k)
 			if err != nil {
 				break
 			}
@@ -478,7 +547,32 @@ func snmpRequest(pduType byte, oid string, reqID int) (string, interface{}, erro
 			return parseOID(vOID), decodeSNMPValue(tVal, vVal), nil
 		}
 	}
-	return "", nil, fmt.Errorf("no matching snmp response")
+	return "", nil, fmt.Errorf("snmp: no matching response")
+}
+
+var (
+	snmpUDPMu   sync.Mutex
+	snmpUDPConn *net.UDPConn
+)
+
+func snmpConnLocked() (*net.UDPConn, error) {
+	if snmpUDPConn != nil {
+		return snmpUDPConn, nil
+	}
+	addr := &net.UDPAddr{IP: net.ParseIP(SNMPHost), Port: SNMPPort}
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		return nil, err
+	}
+	snmpUDPConn = conn
+	return conn, nil
+}
+
+func snmpCloseConnLocked() {
+	if snmpUDPConn != nil {
+		_ = snmpUDPConn.Close()
+		snmpUDPConn = nil
+	}
 }
 
 func berIntValue(val []byte) int {
@@ -615,9 +709,7 @@ func pollSNMPOnce() {
 	} else {
 		snap.Error = err.Error()
 		snap.OK = false
-		snmpStore.mu.Lock()
-		snmpStore.snap = snap
-		snmpStore.mu.Unlock()
+		snmpStore.setSnap(snap)
 		return
 	}
 	if v, err := snmpGet("1.3.6.1.2.1.1.1.0"); err == nil {
@@ -798,6 +890,7 @@ func pollSNMPOnce() {
 	snap.UpdatedAt = now.Unix()
 	snap.PollMs = time.Since(start).Milliseconds()
 	snmpStore.snap = snap
+	snmpStore.rebuildIndexLocked()
 }
 
 func isTrunkMemberPhys(name string) bool {

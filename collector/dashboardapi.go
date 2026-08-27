@@ -95,7 +95,7 @@ type DashboardPageSnapshot struct {
 }
 
 func handleDashboardPage(w http.ResponseWriter, r *http.Request) {
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	snmpAvg := 0.0
 	if stats.SNMP != nil && stats.SNMP.OK {
 		snmpAvg = (stats.SNMP.UplinkInMbps + stats.SNMP.UplinkOutMbps) / 2

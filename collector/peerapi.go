@@ -56,7 +56,7 @@ func peerSNMPIfaces(snmp SNMPSnapshot) (ifaces []SNMPInterface, inSum, outSum fl
 }
 
 func handlePeersPage(w http.ResponseWriter, r *http.Request) {
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	bgp := stats.BGP
 	if bgp == nil {
 		snap := bgpStore.Get()
@@ -152,7 +152,7 @@ func handlePeersDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asNum := parseASNNum(asnQ)
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	bgp := bgpStore.Get()
 	var sessions []BGPPeer
 	for _, p := range bgp.Peers {

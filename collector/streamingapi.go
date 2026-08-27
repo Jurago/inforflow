@@ -83,7 +83,7 @@ func ifaceMatchesService(iface SNMPInterface, service string) bool {
 }
 
 func handleStreamingPage(w http.ResponseWriter, r *http.Request) {
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	cache := computeCacheHit()
 
 	scaled := stats.ByCategoryMbpsScaled
@@ -181,7 +181,7 @@ func handleStreamingDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
 		return
 	}
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	var live *ServiceRate
 	for i := range stats.StreamingRates {
 		if strings.EqualFold(stats.StreamingRates[i].Name, name) {

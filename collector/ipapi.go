@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -264,7 +265,39 @@ func (s *ipAPIStore) storeResult(r ipAPIResp) {
 		s.byASN[asNum] = info
 	}
 	s.lookups++
+	if len(s.byIP) > 8000 {
+		s.pruneByIPLocked(5000)
+	}
 	s.mu.Unlock()
+}
+
+func (s *ipAPIStore) pruneByIPLocked(keep int) {
+	if len(s.byIP) <= keep {
+		return
+	}
+	// Remove entradas sem ASN primeiro, depois arbitrárias até keep
+	type kv struct {
+		ip string
+		as uint32
+	}
+	arr := make([]kv, 0, len(s.byIP))
+	for ip, info := range s.byIP {
+		as := uint32(0)
+		if info != nil {
+			as = info.ASN
+		}
+		arr = append(arr, kv{ip, as})
+	}
+	// Prefer keep entries with ASN
+	sort.Slice(arr, func(i, j int) bool {
+		if (arr[i].as > 0) != (arr[j].as > 0) {
+			return arr[i].as > 0
+		}
+		return arr[i].ip < arr[j].ip
+	})
+	for i := keep; i < len(arr); i++ {
+		delete(s.byIP, arr[i].ip)
+	}
 }
 
 func (s *ipAPIStore) flushBatch() {

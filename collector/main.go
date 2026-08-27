@@ -195,9 +195,18 @@ type HistoryPoint struct {
 
 type FlowStore struct {
 	mu             sync.RWMutex
-	flows          []FlowRecord
+	flowsBuf       []FlowRecord
+	flowsPos       int
+	flowsCount     int
 	stats          AggregatedStats
 	window         []rateSample
+	winBytes       int64
+	winPkts        int64
+	winCatBytes    map[string]int64
+	winCatIn       map[string]int64
+	winCatOut      map[string]int64
+	winRoleBytes   map[string]int64
+	winSvcBytes    map[string]int64
 	seq            uint64
 	started        time.Time
 	history        []HistoryPoint
@@ -206,17 +215,24 @@ type FlowStore struct {
 	dstASNBytes    map[uint32]int64
 	dstASNFlows    map[uint32]int64
 	asnRecentFlows map[uint32][]FlowRecord // últimos flows por ASN destino
+	asnRecentPos   map[uint32]int
 }
 
 var store = &FlowStore{
-	flows:          make([]FlowRecord, 0, MaxHistory),
+	flowsBuf:       make([]FlowRecord, MaxHistory),
 	history:        make([]HistoryPoint, 0, 120),
 	started:        time.Now(),
+	winCatBytes:    make(map[string]int64),
+	winCatIn:       make(map[string]int64),
+	winCatOut:      make(map[string]int64),
+	winRoleBytes:   make(map[string]int64),
+	winSvcBytes:    make(map[string]int64),
 	peerASNBytes:   make(map[uint32]int64),
 	peerASNFlows:   make(map[uint32]int64),
 	dstASNBytes:    make(map[uint32]int64),
 	dstASNFlows:    make(map[uint32]int64),
 	asnRecentFlows: make(map[uint32][]FlowRecord),
+	asnRecentPos:   make(map[uint32]int),
 	stats: AggregatedStats{
 		ByCategory:     make(map[string]int64),
 		ByCategoryMbps: make(map[string]float64),
@@ -293,14 +309,90 @@ func serviceNameFromFlow(f FlowRecord) string {
 	return ""
 }
 
+func (s *FlowStore) pushFlowLocked(f FlowRecord) {
+	s.flowsBuf[s.flowsPos] = f
+	s.flowsPos = (s.flowsPos + 1) % MaxHistory
+	if s.flowsCount < MaxHistory {
+		s.flowsCount++
+	}
+}
+
+func (s *FlowStore) pushASNRecentLocked(as uint32, f FlowRecord) {
+	const capN = 80
+	ring := s.asnRecentFlows[as]
+	if ring == nil {
+		ring = make([]FlowRecord, capN)
+		s.asnRecentFlows[as] = ring
+		s.asnRecentPos[as] = 0
+	}
+	pos := s.asnRecentPos[as]
+	ring[pos%capN] = f
+	s.asnRecentPos[as] = pos + 1
+	if len(s.asnRecentFlows) > 120 {
+		s.pruneASNRecentLocked()
+	}
+}
+
+func (s *FlowStore) applyWindowSampleLocked(sm rateSample, sign int64) {
+	s.winBytes += sign * sm.bytes
+	s.winPkts += sign * sm.packets
+	s.winCatBytes[sm.category] += sign * sm.bytes
+	if sm.direction == "inbound" {
+		s.winCatIn[sm.category] += sign * sm.bytes
+	} else {
+		s.winCatOut[sm.category] += sign * sm.bytes
+	}
+	if sm.ifaceRole != "" {
+		s.winRoleBytes[sm.ifaceRole] += sign * sm.bytes
+	}
+	if sm.service != "" {
+		s.winSvcBytes[sm.service] += sign * sm.bytes
+	}
+}
+
+func (s *FlowStore) recomputeWindowRatesLocked() {
+	const windowSec = 10.0
+	wb, wp := s.winBytes, s.winPkts
+	if wb < 0 {
+		wb = 0
+	}
+	if wp < 0 {
+		wp = 0
+	}
+	s.stats.BytesPerSec = float64(wb) / windowSec
+	s.stats.PacketsPerSec = float64(wp) / windowSec
+	s.stats.Mbps = s.stats.BytesPerSec * 8 / 1e6
+	s.stats.ByCategoryMbps = make(map[string]float64, len(s.winCatBytes))
+	for k, v := range s.winCatBytes {
+		if v > 0 {
+			s.stats.ByCategoryMbps[k] = float64(v) * 8 / windowSec / 1e6
+		}
+	}
+	s.stats.ByCategoryInMbps = make(map[string]float64, len(s.winCatIn))
+	for k, v := range s.winCatIn {
+		if v > 0 {
+			s.stats.ByCategoryInMbps[k] = float64(v) * 8 / windowSec / 1e6
+		}
+	}
+	s.stats.ByCategoryOutMbps = make(map[string]float64, len(s.winCatOut))
+	for k, v := range s.winCatOut {
+		if v > 0 {
+			s.stats.ByCategoryOutMbps[k] = float64(v) * 8 / windowSec / 1e6
+		}
+	}
+	s.stats.ByIfaceRole = make(map[string]float64, len(s.winRoleBytes))
+	for k, v := range s.winRoleBytes {
+		if v > 0 {
+			s.stats.ByIfaceRole[k] = float64(v) * 8 / windowSec / 1e6
+		}
+	}
+}
+
 func (s *FlowStore) AddFlow(f FlowRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.flows = append([]FlowRecord{f}, s.flows...)
-	if len(s.flows) > MaxHistory {
-		s.flows = s.flows[:MaxHistory]
-	}
+	s.pushFlowLocked(f)
 
 	s.stats.TotalBytes += f.Bytes
 	s.stats.TotalPackets += f.Packets
@@ -332,7 +424,6 @@ func (s *FlowStore) AddFlow(f FlowRecord) {
 	peerAS := parseASNNum(f.PeerASN)
 	dstAS := parseASNNum(f.DstASN)
 	if dstAS == 0 {
-		// Fallback: ASN do endpoint remoto quando o flow é outbound
 		if f.Direction == "outbound" {
 			dstAS = parseASNNum(f.ASN)
 		}
@@ -340,9 +431,12 @@ func (s *FlowStore) AddFlow(f FlowRecord) {
 	if !isVerifiedASN(dstAS) {
 		dstAS = 0
 	}
-	s.window = append(s.window, rateSample{
+	sm := rateSample{
 		now, f.Bytes, f.Packets, catKey, svc, peerAS, dstAS, f.Direction, f.IfaceRole, f.IPVersion,
-	})
+	}
+	s.window = append(s.window, sm)
+	s.applyWindowSampleLocked(sm, 1)
+
 	if peerAS > 0 {
 		s.peerASNBytes[peerAS] += f.Bytes
 		s.peerASNFlows[peerAS]++
@@ -350,69 +444,21 @@ func (s *FlowStore) AddFlow(f FlowRecord) {
 	if dstAS > 0 {
 		s.dstASNBytes[dstAS] += f.Bytes
 		s.dstASNFlows[dstAS]++
-		ring := s.asnRecentFlows[dstAS]
-		ring = append([]FlowRecord{f}, ring...)
-		if len(ring) > 80 {
-			ring = ring[:80]
-		}
-		s.asnRecentFlows[dstAS] = ring
-		// Limita número de ASNs no índice
-		if len(s.asnRecentFlows) > 120 {
-			s.pruneASNRecentLocked()
-		}
+		s.pushASNRecentLocked(dstAS, f)
 	}
+
 	cutoff := now.Add(-10 * time.Second)
 	i := 0
 	for i < len(s.window) && s.window[i].at.Before(cutoff) {
+		s.applyWindowSampleLocked(s.window[i], -1)
 		i++
 	}
 	if i > 0 {
 		s.window = s.window[i:]
 	}
 
-	var wb, wp int64
-	catBytes := map[string]int64{}
-	catIn := map[string]int64{}
-	catOut := map[string]int64{}
-	roleBytes := map[string]int64{}
-	svcBytes := map[string]int64{}
-	for _, sm := range s.window {
-		wb += sm.bytes
-		wp += sm.packets
-		catBytes[sm.category] += sm.bytes
-		if sm.direction == "inbound" {
-			catIn[sm.category] += sm.bytes
-		} else {
-			catOut[sm.category] += sm.bytes
-		}
-		if sm.ifaceRole != "" {
-			roleBytes[sm.ifaceRole] += sm.bytes
-		}
-		if sm.service != "" {
-			svcBytes[sm.service] += sm.bytes
-		}
-	}
-	const windowSec = 10.0
-	s.stats.BytesPerSec = float64(wb) / windowSec
-	s.stats.PacketsPerSec = float64(wp) / windowSec
-	s.stats.Mbps = s.stats.BytesPerSec * 8 / 1e6
-	s.stats.ByCategoryMbps = make(map[string]float64, len(catBytes))
-	for k, v := range catBytes {
-		s.stats.ByCategoryMbps[k] = float64(v) * 8 / windowSec / 1e6
-	}
-	s.stats.ByCategoryInMbps = make(map[string]float64, len(catIn))
-	for k, v := range catIn {
-		s.stats.ByCategoryInMbps[k] = float64(v) * 8 / windowSec / 1e6
-	}
-	s.stats.ByCategoryOutMbps = make(map[string]float64, len(catOut))
-	for k, v := range catOut {
-		s.stats.ByCategoryOutMbps[k] = float64(v) * 8 / windowSec / 1e6
-	}
-	s.stats.ByIfaceRole = make(map[string]float64, len(roleBytes))
-	for k, v := range roleBytes {
-		s.stats.ByIfaceRole[k] = float64(v) * 8 / windowSec / 1e6
-	}
-	s.rebuildConsumptionLocked(svcBytes)
+	s.recomputeWindowRatesLocked()
+	s.rebuildConsumptionLocked(s.winSvcBytes)
 }
 
 func (s *FlowStore) rebuildConsumptionLocked(svcBytes map[string]int64) {
@@ -530,14 +576,41 @@ func pruneIPKeys(m map[string]int64) {
 func (s *FlowStore) refreshDerivedLocked() {
 	pruneIPKeys(s.stats.ByDestination)
 	pruneIPKeys(s.stats.ByOrigin)
-	svcBytes := map[string]int64{}
-	for _, sm := range s.window {
-		if sm.service != "" {
-			svcBytes[sm.service] += sm.bytes
+	s.pruneASNMapsLocked(400)
+	s.rebuildConsumptionLocked(s.winSvcBytes)
+	s.rebuildTopCards(s.winSvcBytes)
+}
+
+func (s *FlowStore) pruneASNMapsLocked(maxKeep int) {
+	if maxKeep < 50 {
+		maxKeep = 50
+	}
+	pruneOne := func(bytes map[uint32]int64, flows map[uint32]int64) {
+		if len(bytes) <= maxKeep {
+			return
+		}
+		type kv struct {
+			as uint32
+			b  int64
+		}
+		arr := make([]kv, 0, len(bytes))
+		for as, b := range bytes {
+			arr = append(arr, kv{as, b})
+		}
+		sort.Slice(arr, func(i, j int) bool { return arr[i].b > arr[j].b })
+		keep := make(map[uint32]bool, maxKeep)
+		for i := 0; i < maxKeep && i < len(arr); i++ {
+			keep[arr[i].as] = true
+		}
+		for as := range bytes {
+			if !keep[as] {
+				delete(bytes, as)
+				delete(flows, as)
+			}
 		}
 	}
-	s.rebuildConsumptionLocked(svcBytes)
-	s.rebuildTopCards(svcBytes)
+	pruneOne(s.dstASNBytes, s.dstASNFlows)
+	pruneOne(s.peerASNBytes, s.peerASNFlows)
 }
 
 func (s *FlowStore) startDerivedRefresh() {
@@ -890,12 +963,18 @@ func (s *FlowStore) pruneASNRecentLocked() {
 		n  int
 	}
 	ranked := make([]kv, 0, len(s.asnRecentFlows))
-	for as, ring := range s.asnRecentFlows {
-		ranked = append(ranked, kv{as, len(ring)})
+	for as, pos := range s.asnRecentPos {
+		n := pos
+		if n > 80 {
+			n = 80
+		}
+		ranked = append(ranked, kv{as, n})
 	}
 	sort.Slice(ranked, func(i, j int) bool { return ranked[i].n < ranked[j].n })
 	for len(s.asnRecentFlows) > 100 && len(ranked) > 0 {
-		delete(s.asnRecentFlows, ranked[0].as)
+		as := ranked[0].as
+		delete(s.asnRecentFlows, as)
+		delete(s.asnRecentPos, as)
 		ranked = ranked[1:]
 	}
 }
@@ -907,14 +986,30 @@ func (s *FlowStore) GetASNRecentFlows(as uint32, limit int) []FlowRecord {
 		limit = 80
 	}
 	ring := s.asnRecentFlows[as]
-	if len(ring) == 0 {
+	if ring == nil {
 		return nil
 	}
-	if len(ring) > limit {
-		ring = ring[:limit]
+	pos := s.asnRecentPos[as]
+	n := pos
+	if n > len(ring) {
+		n = len(ring)
 	}
-	out := make([]FlowRecord, len(ring))
-	copy(out, ring)
+	if n > limit {
+		n = limit
+	}
+	out := make([]FlowRecord, 0, n)
+	// newest first
+	for i := 0; i < n; i++ {
+		idx := (pos - 1 - i) % len(ring)
+		if idx < 0 {
+			idx += len(ring)
+		}
+		f := ring[idx]
+		if f.ID == "" {
+			continue
+		}
+		out = append(out, f)
+	}
 	return out
 }
 
@@ -949,6 +1044,44 @@ func (s *FlowStore) GetStatsLite() AggregatedStats {
 		ByCategoryMbps: copyFloatMap(s.stats.ByCategoryMbps),
 	}
 	return out
+}
+
+var (
+	statsCacheMu sync.RWMutex
+	statsCache   AggregatedStats
+	statsCacheAt time.Time
+)
+
+// GetStatsCached — snapshot completo refresca no máx. a cada ~1.5s.
+func (s *FlowStore) GetStatsCached() AggregatedStats {
+	statsCacheMu.RLock()
+	if !statsCacheAt.IsZero() && time.Since(statsCacheAt) < 1500*time.Millisecond {
+		out := statsCache
+		statsCacheMu.RUnlock()
+		return out
+	}
+	statsCacheMu.RUnlock()
+
+	full := s.GetStats()
+	statsCacheMu.Lock()
+	statsCache = full
+	statsCacheAt = time.Now()
+	statsCacheMu.Unlock()
+	return full
+}
+
+func startStatsCacheRefresh() {
+	go func() {
+		time.Sleep(2 * time.Second)
+		ticker := time.NewTicker(1500 * time.Millisecond)
+		for range ticker.C {
+			full := store.GetStats()
+			statsCacheMu.Lock()
+			statsCache = full
+			statsCacheAt = time.Now()
+			statsCacheMu.Unlock()
+		}
+	}()
 }
 
 func buildPeerBreakdown(peers []BGPPeer, total int64) []DestOriginCard {
@@ -1256,12 +1389,24 @@ func normalizeASNQuery(asn string) string {
 func (s *FlowStore) GetRecentFlowsFiltered(limit int, ip, category, q, asn string) []FlowRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if limit <= 0 {
+		limit = 50
+	}
 	ip = strings.ToLower(strings.TrimSpace(ip))
 	category = strings.ToLower(strings.TrimSpace(category))
 	q = strings.ToLower(strings.TrimSpace(q))
 	asn = normalizeASNQuery(asn)
 	var result []FlowRecord
-	for _, f := range s.flows {
+	n := s.flowsCount
+	for i := 0; i < n; i++ {
+		idx := s.flowsPos - 1 - i
+		for idx < 0 {
+			idx += MaxHistory
+		}
+		f := s.flowsBuf[idx%MaxHistory]
+		if f.ID == "" {
+			continue
+		}
 		if ip != "" && !strings.Contains(strings.ToLower(f.SrcIP), ip) && !strings.Contains(strings.ToLower(f.DstIP), ip) {
 			continue
 		}
@@ -1311,11 +1456,11 @@ func resolveBGPPeer(src, dst net.IP, srcAS, dstAS uint32, asnLabel string) (peer
 	return "", "", ""
 }
 
-func ingestRaw(raw RawFlow) {
+func classifyRaw(raw RawFlow) (FlowRecord, bool) {
 	src := raw.SrcIP
 	dst := raw.DstIP
 	if src == nil || dst == nil {
-		return
+		return FlowRecord{}, false
 	}
 
 	srcName, srcCat, _, srcASN := labelForEndpoint(src, raw.SrcAS)
@@ -1454,7 +1599,7 @@ func ingestRaw(raw RawFlow) {
 		talkers.Add(dst.String(), string(category), bytes)
 	}
 
-	store.AddFlow(FlowRecord{
+	return FlowRecord{
 		ID: nextID(), Timestamp: time.Now().Unix(),
 		SrcIP: src.String(), DstIP: dst.String(),
 		SrcPort: int(raw.SrcPort), DstPort: int(raw.DstPort),
@@ -1466,57 +1611,34 @@ func ingestRaw(raw RawFlow) {
 		NextHop: nh, InIf: int(raw.InIf), OutIf: int(raw.OutIf),
 		CacheIface: cacheIface, IfaceRole: ifaceRole, IfaceName: ifaceName,
 		IPVersion: ipVersionOf(src, dst),
-	})
+	}, true
+}
+
+func ingestRaw(raw RawFlow) {
+	if f, ok := classifyRaw(raw); ok {
+		store.AddFlow(f)
+	}
 }
 
 func lookupIfaceMeta(inIf, outIf uint32, direction string) (name, role string) {
-	snap := snmpStore.Get()
 	prefer := outIf
 	if direction == "inbound" {
 		prefer = inIf
 	}
-	lookup := func(idx uint32) (string, string, bool) {
-		if idx == 0 {
-			return "", "", false
-		}
-		for _, iface := range snap.Interfaces {
-			if uint32(iface.Index) == idx {
-				n := iface.Alias
-				if n == "" {
-					n = iface.Name
-				}
-				return n, iface.Role, true
-			}
-		}
-		return "", "", false
-	}
-	if n, r, ok := lookup(prefer); ok {
+	if n, r, ok := snmpStore.LookupIface(prefer); ok {
 		return n, r
 	}
-	if n, r, ok := lookup(inIf); ok {
+	if n, r, ok := snmpStore.LookupIface(inIf); ok {
 		return n, r
 	}
-	if n, r, ok := lookup(outIf); ok {
+	if n, r, ok := snmpStore.LookupIface(outIf); ok {
 		return n, r
 	}
 	return "", ""
 }
 
 func lookupCacheIface(inIf, outIf uint32) string {
-	snap := snmpStore.Get()
-	for _, iface := range snap.Interfaces {
-		if iface.Role != "cache" {
-			continue
-		}
-		idx := uint32(iface.Index)
-		if (inIf > 0 && idx == inIf) || (outIf > 0 && idx == outIf) {
-			if iface.Alias != "" {
-				return iface.Alias
-			}
-			return iface.Name
-		}
-	}
-	return ""
+	return snmpStore.LookupCacheIface(inIf, outIf)
 }
 
 func priority(c FlowCategory) int {
@@ -1955,6 +2077,7 @@ func main() {
 	loadPeersConfig()
 	startSessionJanitor()
 	store.startDerivedRefresh()
+	startStatsCacheRefresh()
 	StartIPAPIResolver()
 	StartSNMPPoller()
 	StartBGPPoller()

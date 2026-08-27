@@ -67,7 +67,7 @@ type RouterDetailSnapshot struct {
 
 func handleRouterPage(w http.ResponseWriter, r *http.Request) {
 	snmp := snmpStore.Get()
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	now := time.Now().Unix()
 	age := int64(0)
 	if snmp.UpdatedAt > 0 {
@@ -226,7 +226,7 @@ func handleRouterDetail(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	eff := 1.0
-	if stats := store.GetStats(); stats.Sampling != nil && stats.Sampling.Effective > 1 {
+	if stats := store.GetStatsCached(); stats.Sampling != nil && stats.Sampling.Effective > 1 {
 		eff = stats.Sampling.Effective
 	}
 	nfMbps := float64(nfBytes) * 8 / 10 / 1e6 * eff
@@ -240,7 +240,7 @@ func handleRouterDetail(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	writeJSON(w, RouterDetailSnapshot{
 		Iface:          iface,
 		History:        hist,

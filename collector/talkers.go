@@ -76,6 +76,18 @@ func (t *talkerStore) Add(ip string, cat string, bytes int64) {
 	if i > 0 {
 		t.window = t.window[i:]
 	}
+	// Bound totais: remove IPs sem atividade recente na janela se mapa crescer
+	if len(t.totals) > 5000 {
+		active := map[string]bool{}
+		for _, s := range t.window {
+			active[s.ip] = true
+		}
+		for ip := range t.totals {
+			if !active[ip] {
+				delete(t.totals, ip)
+			}
+		}
+	}
 }
 
 func (t *talkerStore) Top(n int) []TalkerStats {

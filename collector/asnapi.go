@@ -76,7 +76,7 @@ func buildASNNames(dest, peers []ASNTraffic) map[string]string {
 }
 
 func handleASN(w http.ResponseWriter, r *http.Request) {
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	daily := getASNDailySnapshot()
 	writeJSON(w, ASNPageSnapshot{
 		Destinations: stats.ASNBreakdown,
@@ -155,7 +155,7 @@ func handleASNDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	asNum := parseASNNum(asnQ)
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	var live, peerLive *ASNTraffic
 	for i := range stats.ASNBreakdown {
 		if stats.ASNBreakdown[i].ASN == asnQ {

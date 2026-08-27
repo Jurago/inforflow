@@ -69,8 +69,8 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "inforflow_category_mbps_scaled{category=%q} %.4f\n", cat, mbps*samp.Effective)
 		}
 	}
-	// Top ASNs de destino (Mbps estimado)
-	for _, a := range store.GetStats().ASNBreakdown {
+	// Top ASNs via cache (evita GetStats completo no scrape)
+	for _, a := range store.GetStatsCached().ASNBreakdown {
 		if a.MbpsScaled <= 0 {
 			continue
 		}

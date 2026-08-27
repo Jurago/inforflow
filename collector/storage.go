@@ -8,28 +8,72 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 var (
-	historyDB   *sql.DB
-	storageOnce sync.Once
-	storageCh   chan storageJob
+	historyDB         *sql.DB
+	storageOnce       sync.Once
+	storageCh         chan storageJob
+	storageDropped    uint64
+	storageBatchFlush uint64
 )
 
 type storageJob struct {
-	pt  HistoryPoint
-	v4  float64
-	v6  float64
+	pt HistoryPoint
+	v4 float64
+	v6 float64
 }
 
 func startStorageWriter() {
-	storageCh = make(chan storageJob, 64)
+	storageCh = make(chan storageJob, 256)
 	go func() {
-		for job := range storageCh {
-			storageInsert(job.pt, job.v4, job.v6)
+		batch := make([]storageJob, 0, 16)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		flush := func() {
+			if len(batch) == 0 || historyDB == nil {
+				batch = batch[:0]
+				return
+			}
+			tx, err := historyDB.Begin()
+			if err != nil {
+				for _, j := range batch {
+					storageInsert(j.pt, j.v4, j.v6)
+				}
+				batch = batch[:0]
+				return
+			}
+			for _, j := range batch {
+				if err := storageInsertTx(tx, j.pt, j.v4, j.v6); err != nil {
+					log.Printf("sqlite batch insert: %v", err)
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				log.Printf("sqlite batch commit: %v", err)
+				_ = tx.Rollback()
+			} else {
+				atomic.AddUint64(&storageBatchFlush, 1)
+			}
+			batch = batch[:0]
+		}
+		for {
+			select {
+			case job, ok := <-storageCh:
+				if !ok {
+					flush()
+					return
+				}
+				batch = append(batch, job)
+				if len(batch) >= 8 {
+					flush()
+				}
+			case <-ticker.C:
+				flush()
+			}
 		}
 	}()
 }
@@ -42,12 +86,14 @@ func storageEnqueue(pt HistoryPoint, v4, v6 float64) {
 	select {
 	case storageCh <- storageJob{pt: pt, v4: v4, v6: v6}:
 	default:
-		go storageInsert(pt, v4, v6)
+		atomic.AddUint64(&storageDropped, 1)
+		log.Printf("sqlite: fila cheia — descartando amostra ts=%d (drops=%d)",
+			pt.Ts, atomic.LoadUint64(&storageDropped))
 	}
 }
 
-const defaultLocalHours = 72  // 3 dias na VM
-const defaultS3Days     = 30  // restante no S3
+const defaultLocalHours = 72 // 3 dias na VM
+const defaultS3Days = 30     // restante no S3
 
 func localRetentionSec() int64 {
 	h := GetConfig().HistoryLocalH
@@ -108,7 +154,6 @@ CREATE TABLE IF NOT EXISTS s3_exported (
 			log.Printf("sqlite schema: %v", err)
 			return
 		}
-		// Migração suave para DBs existentes
 		for _, col := range []string{
 			`ALTER TABLE history_raw ADD COLUMN by_asn TEXT NOT NULL DEFAULT '{}'`,
 			`ALTER TABLE history_raw ADD COLUMN by_asn_scaled TEXT NOT NULL DEFAULT '{}'`,
@@ -128,10 +173,7 @@ CREATE TABLE IF NOT EXISTS s3_exported (
 	})
 }
 
-func storageInsert(pt HistoryPoint, ipv4Mbps, ipv6Mbps float64) {
-	if historyDB == nil {
-		return
-	}
+func storageInsertArgs(pt HistoryPoint, ipv4Mbps, ipv6Mbps float64) []interface{} {
 	catB, _ := json.Marshal(pt.ByCategory)
 	scaledB, _ := json.Marshal(pt.ByCategoryScaled)
 	asnB, _ := json.Marshal(pt.ByASN)
@@ -149,18 +191,32 @@ func storageInsert(pt HistoryPoint, ipv4Mbps, ipv6Mbps float64) {
 	if ipv6Mbps == 0 && pt.IPv6Mbps > 0 {
 		ipv6Mbps = pt.IPv6Mbps
 	}
-	_, err := historyDB.Exec(`INSERT OR REPLACE INTO history_raw
-		(ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor, by_category, by_category_scaled, ipv4_mbps, ipv6_mbps, by_asn, by_asn_scaled, by_peer_asn, by_peer_asn_scaled, by_streaming, by_streaming_scaled, by_cdn, by_cdn_scaled, by_snmp_role)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	return []interface{}{
 		pt.Ts, pt.Mbps, pt.MbpsScaled, pt.SNMPIn, pt.SNMPOut, pt.SamplingFactor,
 		string(catB), string(scaledB), ipv4Mbps, ipv6Mbps, string(asnB), string(asnScaledB),
 		string(peerB), string(peerScaledB), string(streamB), string(streamScaledB),
-		string(cdnB), string(cdnScaledB), string(roleB))
+		string(cdnB), string(cdnScaledB), string(roleB),
+	}
+}
+
+const storageInsertSQL = `INSERT OR REPLACE INTO history_raw
+		(ts, mbps, mbps_scaled, snmp_in, snmp_out, sampling_factor, by_category, by_category_scaled, ipv4_mbps, ipv6_mbps, by_asn, by_asn_scaled, by_peer_asn, by_peer_asn_scaled, by_streaming, by_streaming_scaled, by_cdn, by_cdn_scaled, by_snmp_role)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+
+func storageInsert(pt HistoryPoint, ipv4Mbps, ipv6Mbps float64) {
+	if historyDB == nil {
+		return
+	}
+	_, err := historyDB.Exec(storageInsertSQL, storageInsertArgs(pt, ipv4Mbps, ipv6Mbps)...)
 	if err != nil {
 		log.Printf("sqlite insert: %v", err)
 	}
 }
 
+func storageInsertTx(tx *sql.Tx, pt HistoryPoint, ipv4Mbps, ipv6Mbps float64) error {
+	_, err := tx.Exec(storageInsertSQL, storageInsertArgs(pt, ipv4Mbps, ipv6Mbps)...)
+	return err
+}
 func storageQueryLocal(since int64) []HistoryPoint {
 	if historyDB == nil {
 		return nil

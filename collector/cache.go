@@ -21,7 +21,7 @@ type CacheHitSnapshot struct {
 
 func computeCacheHit() CacheHitSnapshot {
 	snmp := snmpStore.Get()
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	samp := sampling.Get()
 	eff := samp.Effective
 	if eff < 1 {

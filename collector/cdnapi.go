@@ -152,7 +152,7 @@ func ifaceMatchesCDN(iface SNMPInterface, cdn string) bool {
 }
 
 func handleCDNPage(w http.ResponseWriter, r *http.Request) {
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	cache := computeCacheHit()
 
 	scaled := stats.ByCategoryMbpsScaled
@@ -256,7 +256,7 @@ func handleCDNDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
 		return
 	}
-	stats := store.GetStats()
+	stats := store.GetStatsCached()
 	rates := enrichCDNRates(stats.CDNRates)
 	var live *CDNRate
 	for i := range rates {
